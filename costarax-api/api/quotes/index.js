@@ -43,9 +43,9 @@ module.exports = async (req, res) => {
         .eq('supplier_id', org.supplier_id).order('created_at', { ascending: false }))
 
     } else {
-      // Admin — see all quotes
+      // Admin — see all quotes with names
       ;({ data, error } = await supabaseAdmin.from('quote_requests')
-        .select('id,buyer_business_id,supplier_id,products_summary,status,created_at')
+        .select('id,buyer_business_id,supplier_id,products_summary,status,created_at,businesses(name),suppliers(name)')
         .order('created_at', { ascending: false }).limit(100))
     }
 
