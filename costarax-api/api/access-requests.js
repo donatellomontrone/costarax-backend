@@ -25,16 +25,12 @@ module.exports = async (req, res) => {
     if (!company_name)  return res.status(400).json({ error: 'company_name is required' })
     if (!business_type) return res.status(400).json({ error: 'business_type is required' })
 
+    const id = body.id || undefined  // use client-provided UUID if available
+    const insertData = { requested_role, company_name, business_type, contact_email, tin, contact_phone }
+    if (id) insertData.id = id
     const { data, error } = await supabaseAdmin
       .from('access_requests')
-      .insert({
-        requested_role,
-        company_name,
-        business_type,
-        contact_email,
-        tin,
-        contact_phone
-      })
+      .insert(insertData)
       .select('id')
       .single()
 
