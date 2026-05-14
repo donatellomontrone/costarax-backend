@@ -1,0 +1,10 @@
+{
+  "name": "costarax-api",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@supabase/supabase-js": "^2.43.4",
+    "nodemailer": "^6.9.13",
+    "formidable": "^3.5.1"
+  }
+}
