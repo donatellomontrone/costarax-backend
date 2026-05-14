@@ -1,6 +1,10 @@
 const { supabaseAdmin, requireAuth } = require('../../../lib/supabase-admin')
 
+const CORS_H = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,PATCH,DELETE,OPTIONS','Access-Control-Allow-Headers':'Content-Type,Authorization'}
+
 module.exports = async (req, res) => {
+  Object.entries(CORS_H).forEach(([k,v]) => res.setHeader(k,v))
+  if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
