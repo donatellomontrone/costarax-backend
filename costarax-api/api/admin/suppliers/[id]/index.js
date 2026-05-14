@@ -1,4 +1,4 @@
-const { supabaseAdmin, requireAdmin } = require('../../../lib/supabase-admin')
+const { supabaseAdmin, requireAdmin } = require('../../../../lib/supabase-admin')
 
 const CORS_H = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,PATCH,DELETE,OPTIONS','Access-Control-Allow-Headers':'Content-Type,Authorization'}
 
@@ -10,48 +10,42 @@ module.exports = async (req, res) => {
   const auth = await requireAdmin(req, res)
   if (!auth) return
 
-  // GET — list all suppliers with full details
-  if (req.method === 'GET') {
-    const { data, error } = await supabaseAdmin
-      .from('suppliers')
-      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan')
-      .order('name')
-    if (error) return res.status(500).json({ error: error.message })
-    return res.status(200).json(data)
-  }
+  const { id } = req.query
 
-  // POST — create new supplier
-  if (req.method === 'POST') {
-    const { name, category, tagline, city, region, minimum_order_php, tin, delivery_coverage } = req.body
-    if (!name || !category) return res.status(400).json({ error: 'name and category are required' })
+  // PATCH — update supplier fields
+  if (req.method === 'PATCH') {
+    const allowed = ['name', 'category', 'tagline', 'city', 'region', 'minimum_order_php',
+                     'tin', 'delivery_coverage', 'verified', 'active', 'status', 'plan']
+    const updates = {}
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key]
+    }
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' })
+    updates.updated_at = new Date().toISOString()
 
-    const { data, error } = await supabaseAdmin.from('suppliers').insert({
-      name: name.trim(),
-      legal_name: name.trim(),
-      category,
-      tagline: tagline?.trim() || null,
-      city: city?.trim() || null,
-      region: region?.trim() || null,
-      minimum_order_php: minimum_order_php || 1000,
-      tin: tin?.trim() || null,
-      delivery_coverage: delivery_coverage?.trim() || null,
-      verified: false,
-      active: false,
-      status: 'pending',
-      rating: 5.0,
-      review_count: 0
-    }).select('id, name').single()
-
+    const { error } = await supabaseAdmin.from('suppliers').update(updates).eq('id', id)
     if (error) return res.status(500).json({ error: error.message })
 
     await supabaseAdmin.from('admin_actions').insert({
       admin_id: auth.user.id,
-      action_type: 'create_supplier',
-      target_id: data.id,
-      notes: `Created supplier: ${name}`
+      action_type: 'edit_supplier',
+      target_id: id,
+      notes: `Updated fields: ${Object.keys(updates).join(', ')}`
     }).catch(() => {})
 
-    return res.status(201).json({ id: data.id, message: `${name} created successfully` })
+    return res.status(200).json({ message: 'Supplier updated' })
+  }
+
+  // DELETE — remove supplier
+  if (req.method === 'DELETE') {
+    const { data: s } = await supabaseAdmin.from('suppliers').select('name').eq('id', id).single()
+    const { error } = await supabaseAdmin.from('suppliers').update({ active: false, status: 'removed' }).eq('id', id)
+    if (error) return res.status(500).json({ error: error.message })
+    await supabaseAdmin.from('admin_actions').insert({
+      admin_id: auth.user.id, action_type: 'remove_supplier', target_id: id,
+      notes: `Removed supplier: ${s?.name}`
+    }).catch(() => {})
+    return res.status(200).json({ message: 'Supplier removed' })
   }
 
   res.status(405).json({ error: 'Method not allowed' })
