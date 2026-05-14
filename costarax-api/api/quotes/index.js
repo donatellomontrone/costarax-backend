@@ -1,104 +1,47 @@
-const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
-const { sendEmail, quoteReceivedEmail } = require('../../lib/email')
+const { supabaseAdmin, requireAdmin } = require('../../../../lib/supabase-admin')
 
 module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end()
 
-  const auth = await requireAuth(req, res)
+  const auth = await requireAdmin(req, res)
   if (!auth) return
 
-  if (req.method === 'GET') {
-    let data, error
+  const { id } = req.query
 
-    if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
-      // Find business by user email
-      const { data: biz } = await supabaseAdmin
-        .from('businesses').select('id').eq('contact_email', auth.user.email).single()
-
-      if (!biz) {
-        // Try organization_members as fallback
-        const { data: org } = await supabaseAdmin
-          .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
-        if (!org) return res.status(200).json([])
-        ;({ data, error } = await supabaseAdmin.from('quote_requests')
-          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at')
-          .eq('buyer_business_id', org.business_id).order('created_at', { ascending: false }))
-      } else {
-        ;({ data, error } = await supabaseAdmin.from('quote_requests')
-          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at')
-          .eq('buyer_business_id', biz.id).order('created_at', { ascending: false }))
-      }
-
-    } else if (auth.profile.role === 'supplier') {
-      const { data: org } = await supabaseAdmin
-        .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
-      if (!org) return res.status(200).json([])
-      ;({ data, error } = await supabaseAdmin.from('quote_requests')
-        .select('id,buyer_business_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at')
-        .eq('supplier_id', org.supplier_id).order('created_at', { ascending: false }))
-    } else {
-      ;({ data, error } = await supabaseAdmin.from('quote_requests')
-        .select('*').order('created_at', { ascending: false }).limit(100))
+  // PATCH — update supplier fields
+  if (req.method === 'PATCH') {
+    const allowed = ['name', 'category', 'tagline', 'city', 'region', 'minimum_order_php',
+                     'tin', 'delivery_coverage', 'verified', 'active', 'status', 'plan']
+    const updates = {}
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key]
     }
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' })
+    updates.updated_at = new Date().toISOString()
 
+    const { error } = await supabaseAdmin.from('suppliers').update(updates).eq('id', id)
     if (error) return res.status(500).json({ error: error.message })
-    return res.status(200).json(data || [])
+
+    await supabaseAdmin.from('admin_actions').insert({
+      admin_id: auth.user.id,
+      action_type: 'edit_supplier',
+      target_id: id,
+      notes: `Updated fields: ${Object.keys(updates).join(', ')}`
+    }).catch(() => {})
+
+    return res.status(200).json({ message: 'Supplier updated' })
   }
 
-  if (req.method === 'POST') {
-    const { supplier_id, products_summary, message, weekly_volume } = req.body
-    if (!supplier_id || !message) return res.status(400).json({ error: 'supplier_id and message are required' })
-
-    // Find buyer business by email first, then organization_members as fallback
-    let buyerBusinessId = null
-    let buyerName = null
-
-    const { data: biz } = await supabaseAdmin
-      .from('businesses').select('id,name').eq('contact_email', auth.user.email).single()
-
-    if (biz) {
-      buyerBusinessId = biz.id
-      buyerName = biz.name
-    } else {
-      const { data: org } = await supabaseAdmin
-        .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
-      if (org?.business_id) {
-        buyerBusinessId = org.business_id
-        const { data: b } = await supabaseAdmin.from('businesses').select('name').eq('id', org.business_id).single()
-        buyerName = b?.name
-      }
-    }
-
-    if (!buyerBusinessId) {
-      return res.status(400).json({ error: 'No business associated with this account' })
-    }
-
-    const { data: quote, error } = await supabaseAdmin.from('quote_requests').insert({
-      buyer_business_id: buyerBusinessId,
-      supplier_id,
-      requested_by: auth.user.id,
-      products_summary,
-      message,
-      weekly_volume: weekly_volume || null,
-      status: 'sent'
-    }).select('id').single()
-
+  // DELETE — remove supplier
+  if (req.method === 'DELETE') {
+    const { data: s } = await supabaseAdmin.from('suppliers').select('name').eq('id', id).single()
+    const { error } = await supabaseAdmin.from('suppliers').update({ active: false, status: 'removed' }).eq('id', id)
     if (error) return res.status(500).json({ error: error.message })
-
-    // Email supplier
-    try {
-      const { data: supplier } = await supabaseAdmin.from('suppliers').select('name').eq('id', supplier_id).single()
-      const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', supplier_id).single()
-      if (supplierMember?.user_id) {
-        const { data: supplierProfile } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).single()
-        if (supplierProfile?.email) {
-          const tpl = quoteReceivedEmail({ supplierName: supplier?.name, buyerName: buyerName || auth.user.email, products: products_summary || '', message })
-          await sendEmail({ to: supplierProfile.email, ...tpl })
-        }
-      }
-    } catch(e) { console.log('Email error:', e.message) }
-
-    return res.status(201).json({ id: quote.id, message: 'Quote request sent' })
+    await supabaseAdmin.from('admin_actions').insert({
+      admin_id: auth.user.id, action_type: 'remove_supplier', target_id: id,
+      notes: `Removed supplier: ${s?.name}`
+    }).catch(() => {})
+    return res.status(200).json({ message: 'Supplier removed' })
   }
 
   res.status(405).json({ error: 'Method not allowed' })
