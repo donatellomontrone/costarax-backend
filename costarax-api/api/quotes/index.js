@@ -32,8 +32,11 @@ module.exports = async (req, res) => {
     const { supplier_id, products_summary, message, weekly_volume } = req.body
     if (!supplier_id || !message) return res.status(400).json({ error: 'supplier_id and message are required' })
 
-    const { data: org } = await supabaseAdmin.from('organization_members').select('business_id,businesses(name,contact_email)').eq('user_id', auth.user.id).single()
+    const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
     if (!org?.business_id) return res.status(400).json({ error: 'No business associated with this account' })
+
+    // Get business details separately
+    const { data: biz } = await supabaseAdmin.from('businesses').select('name,contact_email').eq('id', org.business_id).single()
 
     const { data: quote, error } = await supabaseAdmin.from('quote_requests').insert({
       buyer_business_id: org.business_id, supplier_id, requested_by: auth.user.id,
@@ -47,7 +50,7 @@ module.exports = async (req, res) => {
     const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('profiles(email)').eq('supplier_id', supplier_id).single()
     const supplierEmail = supplierMember?.profiles?.email
     if (supplierEmail) {
-      const tpl = quoteReceivedEmail({ supplierName: supplier?.name, buyerName: org.businesses?.name || 'A verified buyer', products: products_summary || '', message })
+      const tpl = quoteReceivedEmail({ supplierName: supplier?.name, buyerName: biz?.name || 'A verified buyer', products: products_summary || '', message })
       await sendEmail({ to: supplierEmail, ...tpl })
     }
 
