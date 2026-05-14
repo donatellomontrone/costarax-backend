@@ -43,10 +43,25 @@ module.exports = async (req, res) => {
         .eq('supplier_id', org.supplier_id).order('created_at', { ascending: false }))
 
     } else {
-      // Admin — see all quotes with names
+      // Admin — see all quotes, then enrich with names
       ;({ data, error } = await supabaseAdmin.from('quote_requests')
-        .select('id,buyer_business_id,supplier_id,products_summary,status,created_at,businesses(name),suppliers(name)')
+        .select('id,buyer_business_id,supplier_id,products_summary,status,created_at')
         .order('created_at', { ascending: false }).limit(100))
+      if (data?.length) {
+        const bizIds = [...new Set(data.map(q => q.buyer_business_id).filter(Boolean))]
+        const supIds = [...new Set(data.map(q => q.supplier_id).filter(Boolean))]
+        const [bizRes, supRes] = await Promise.all([
+          bizIds.length ? supabaseAdmin.from('businesses').select('id,name').in('id', bizIds) : { data: [] },
+          supIds.length ? supabaseAdmin.from('suppliers').select('id,name').in('id', supIds) : { data: [] }
+        ])
+        const bizMap = Object.fromEntries((bizRes.data||[]).map(b => [b.id, b.name]))
+        const supMap = Object.fromEntries((supRes.data||[]).map(s => [s.id, s.name]))
+        data = data.map(q => ({
+          ...q,
+          businesses: { name: bizMap[q.buyer_business_id] || null },
+          suppliers: { name: supMap[q.supplier_id] || null }
+        }))
+      }
     }
 
     if (error) return res.status(500).json({ error: error.message })
