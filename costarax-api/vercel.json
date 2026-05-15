@@ -2,7 +2,8 @@
   "functions": {
     "api/**/*.js": {
       "memory": 512,
-      "maxDuration": 15
+      "maxDuration": 30,
+      "runtime": "nodejs18.x"
     }
   },
   "headers": [

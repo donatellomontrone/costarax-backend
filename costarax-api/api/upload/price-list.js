@@ -1,9 +1,34 @@
+const https = require('https')
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 
 const CORS_H = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST,OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type,Authorization'
+}
+
+// Promisified HTTPS POST — works on Node 14/16/18, no fetch needed
+function httpsPost(hostname, path, headers, bodyObj) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(bodyObj)
+    const req = https.request(
+      { hostname, path, method: 'POST', headers: { ...headers, 'Content-Length': Buffer.byteLength(body) } },
+      (res) => {
+        let data = ''
+        res.on('data', chunk => { data += chunk })
+        res.on('end', () => {
+          try {
+            resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, body: JSON.parse(data) })
+          } catch (e) {
+            reject(new Error('Failed to parse response: ' + data.slice(0, 200)))
+          }
+        })
+      }
+    )
+    req.on('error', reject)
+    req.write(body)
+    req.end()
+  })
 }
 
 module.exports = async (req, res) => {
@@ -43,7 +68,7 @@ module.exports = async (req, res) => {
     status: 'processing'
   }).select('id').single().catch(() => ({ data: null }))
 
-  // Call OpenAI
+  // Check OpenAI key
   if (!process.env.OPENAI_API_KEY) {
     return res.status(500).json({ error: 'OPENAI_API_KEY not configured on server' })
   }
@@ -69,24 +94,28 @@ ${text.slice(0, 8000)}
 Return JSON array only:
 [{"name":"Product","price":100,"unit":"kg"},...]`
 
-    const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
+    const aiRes = await httpsPost(
+      'api.openai.com',
+      '/v1/chat/completions',
+      {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
       },
-      body: JSON.stringify({
+      {
         model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
         max_tokens: 2000
-      })
-    })
-    const aiData = await aiRes.json()
-    if (!aiRes.ok) throw new Error(aiData.error?.message || 'OpenAI error')
-    const content = aiData.choices[0].message.content.trim()
+      }
+    )
+
+    if (!aiRes.ok) {
+      throw new Error(aiRes.body?.error?.message || `OpenAI returned ${aiRes.status}`)
+    }
+
+    const content = aiRes.body.choices[0].message.content.trim()
     const jsonMatch = content.match(/\[[\s\S]*\]/)
-    if (!jsonMatch) throw new Error('No JSON returned by AI')
+    if (!jsonMatch) throw new Error('No JSON array returned by AI')
     extracted = JSON.parse(jsonMatch[0])
   } catch (e) {
     await supabaseAdmin.from('price_list_uploads').update({
