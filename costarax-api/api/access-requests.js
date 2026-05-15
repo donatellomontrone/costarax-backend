@@ -19,6 +19,8 @@ module.exports = async (req, res) => {
     const business_type  = (body.business_type || '').trim()
     const tin            = (body.tin || '').trim() || null
     const contact_phone  = (body.contact_phone || '').trim() || null
+    const city           = (body.city || '').trim() || null
+    const region         = (body.region || '').trim() || null
     const requested_role = body.requested_role === 'supplier' ? 'supplier' : 'buyer'
 
     if (!contact_email)  return res.status(400).json({ error: 'contact_email is required' })
@@ -28,7 +30,7 @@ module.exports = async (req, res) => {
     // Insert without custom id — let DB generate it
     const { error: insertErr } = await supabaseAdmin
       .from('access_requests')
-      .insert({ requested_role, company_name, business_type, contact_email, tin, contact_phone })
+      .insert({ requested_role, company_name, business_type, contact_email, tin, contact_phone, city, region })
 
     if (insertErr) {
       if (insertErr.code === '23505') {
