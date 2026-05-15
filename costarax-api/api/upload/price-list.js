@@ -36,12 +36,9 @@ async function extractText(filePath, mimetype, originalName) {
     return text
   }
 
-  // PDF
+  // PDF — not supported in serverless (use CSV or Excel instead)
   if (ext === 'pdf' || mimetype === 'application/pdf') {
-    const pdfParse = require('pdf-parse')
-    const buffer = fs.readFileSync(filePath)
-    const data = await pdfParse(buffer)
-    return data.text
+    return '__PDF_NOT_SUPPORTED__'
   }
 
   return null
@@ -174,6 +171,13 @@ module.exports = async (req, res) => {
   try { rawText = await extractText(file.filepath, file.mimetype, file.originalFilename) }
   catch (e) { rawText = null }
   fs.unlinkSync(file.filepath)
+
+  if (rawText === '__PDF_NOT_SUPPORTED__') {
+    await supabaseAdmin.from('price_list_uploads').update({
+      status: 'error', error_message: 'PDF not supported', processed_at: new Date().toISOString()
+    }).eq('id', uploadRecord?.id)
+    return res.status(422).json({ error: 'PDF not supported yet. Please upload a CSV or Excel (.xlsx) file.' })
+  }
 
   if (!rawText || rawText.trim().length < 20) {
     await supabaseAdmin.from('price_list_uploads').update({
