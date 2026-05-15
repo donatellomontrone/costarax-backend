@@ -32,6 +32,7 @@ function httpsPost(hostname, path, headers, bodyObj) {
 }
 
 module.exports = async (req, res) => {
+  try {
   Object.entries(CORS_H).forEach(([k, v]) => res.setHeader(k, v))
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
@@ -171,4 +172,8 @@ Return JSON array only:
     matched,
     unmatched
   })
+  } catch (fatalErr) {
+    console.error('FATAL price-list error:', fatalErr)
+    return res.status(500).json({ error: 'Fatal: ' + (fatalErr.message || String(fatalErr)) })
+  }
 }
