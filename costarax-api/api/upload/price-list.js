@@ -7,7 +7,6 @@ const CORS_H = {
   'Access-Control-Allow-Headers': 'Content-Type,Authorization'
 }
 
-// Promisified HTTPS POST — works on Node 14/16/18, no fetch needed
 function httpsPost(hostname, path, headers, bodyObj) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj)
@@ -33,50 +32,51 @@ function httpsPost(hostname, path, headers, bodyObj) {
 
 module.exports = async (req, res) => {
   try {
-  Object.entries(CORS_H).forEach(([k, v]) => res.setHeader(k, v))
-  if (req.method === 'OPTIONS') return res.status(200).end()
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+    Object.entries(CORS_H).forEach(([k, v]) => res.setHeader(k, v))
+    if (req.method === 'OPTIONS') return res.status(200).end()
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const auth = await requireAuth(req, res)
-  if (!auth) return
+    const auth = await requireAuth(req, res)
+    if (!auth) return
 
-  if (!['supplier', 'admin'].includes(auth.profile.role)) {
-    return res.status(403).json({ error: 'Supplier access required' })
-  }
+    if (!['supplier', 'admin'].includes(auth.profile.role)) {
+      return res.status(403).json({ error: 'Supplier access required' })
+    }
 
-  const { text, file_name } = req.body || {}
-  if (!text || text.trim().length < 10) {
-    return res.status(400).json({ error: 'No content provided' })
-  }
+    const { text, file_name } = req.body || {}
+    if (!text || text.trim().length < 10) {
+      return res.status(400).json({ error: 'No content provided' })
+    }
 
-  // Resolve supplier
-  let supplierId = null, supplierName = 'Supplier'
-  const { data: org } = await supabaseAdmin
-    .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
-  supplierId = org?.supplier_id || null
-  if (!supplierId && auth.profile.role !== 'admin') {
-    return res.status(403).json({ error: 'No supplier linked to this account' })
-  }
-  if (supplierId) {
-    const { data: sup } = await supabaseAdmin.from('suppliers').select('name').eq('id', supplierId).single()
-    if (sup?.name) supplierName = sup.name
-  }
+    // Resolve supplier
+    let supplierId = null, supplierName = 'Supplier'
+    const { data: org } = await supabaseAdmin
+      .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+    supplierId = org?.supplier_id || null
+    if (!supplierId && auth.profile.role !== 'admin') {
+      return res.status(403).json({ error: 'No supplier linked to this account' })
+    }
+    if (supplierId) {
+      const { data: sup } = await supabaseAdmin.from('suppliers').select('name').eq('id', supplierId).single()
+      if (sup?.name) supplierName = sup.name
+    }
 
-  // Record upload
-  const { data: uploadRecord } = await supabaseAdmin.from('price_list_uploads').insert({
-    supplier_id: supplierId,
-    file_name: file_name || 'price-list',
-    status: 'processing'
-  }).select('id').single().catch(() => ({ data: null }))
+    // Record upload (Supabase v2 never throws — no .catch() needed)
+    const { data: uploadRecord } = await supabaseAdmin
+      .from('price_list_uploads')
+      .insert({ supplier_id: supplierId, file_name: file_name || 'price-list', status: 'processing' })
+      .select('id')
+      .single()
+    const uploadId = uploadRecord?.id || null
 
-  // Check OpenAI key
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: 'OPENAI_API_KEY not configured on server' })
-  }
+    // Check OpenAI key
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ error: 'OPENAI_API_KEY not configured on server' })
+    }
 
-  let extracted = []
-  try {
-    const prompt = `You are a data extraction assistant for a Filipino foodservice procurement platform.
+    let extracted = []
+    try {
+      const prompt = `You are a data extraction assistant for a Filipino foodservice procurement platform.
 
 Extract all products and prices from this supplier price list. Return ONLY a valid JSON array.
 
@@ -95,83 +95,78 @@ ${text.slice(0, 8000)}
 Return JSON array only:
 [{"name":"Product","price":100,"unit":"kg"},...]`
 
-    const aiRes = await httpsPost(
-      'api.openai.com',
-      '/v1/chat/completions',
-      {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-      },
-      {
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
-        max_tokens: 2000
-      }
-    )
+      const aiRes = await httpsPost(
+        'api.openai.com',
+        '/v1/chat/completions',
+        { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+        { model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 2000 }
+      )
 
-    if (!aiRes.ok) {
-      throw new Error(aiRes.body?.error?.message || `OpenAI returned ${aiRes.status}`)
+      if (!aiRes.ok) throw new Error(aiRes.body?.error?.message || `OpenAI returned ${aiRes.status}`)
+
+      const content = aiRes.body.choices[0].message.content.trim()
+      const jsonMatch = content.match(/\[[\s\S]*\]/)
+      if (!jsonMatch) throw new Error('No JSON array returned by AI')
+      extracted = JSON.parse(jsonMatch[0])
+    } catch (e) {
+      if (uploadId) {
+        await supabaseAdmin.from('price_list_uploads').update({
+          status: 'error', error_message: e.message, processed_at: new Date().toISOString()
+        }).eq('id', uploadId)
+      }
+      return res.status(500).json({ error: 'AI extraction failed: ' + e.message })
     }
 
-    const content = aiRes.body.choices[0].message.content.trim()
-    const jsonMatch = content.match(/\[[\s\S]*\]/)
-    if (!jsonMatch) throw new Error('No JSON array returned by AI')
-    extracted = JSON.parse(jsonMatch[0])
-  } catch (e) {
-    await supabaseAdmin.from('price_list_uploads').update({
-      status: 'error', error_message: e.message, processed_at: new Date().toISOString()
-    }).eq('id', uploadRecord?.id).catch(() => {})
-    return res.status(500).json({ error: 'AI extraction failed: ' + e.message })
-  }
+    if (!extracted.length) {
+      return res.status(422).json({ error: 'No products found in the file.' })
+    }
 
-  if (!extracted.length) {
-    return res.status(422).json({ error: 'No products found in the file.' })
-  }
+    // Match against products catalog
+    const { data: catalog } = await supabaseAdmin.from('products').select('id, canonical_name').eq('active', true)
+    const products = catalog || []
 
-  // Match against products catalog
-  const { data: catalog } = await supabaseAdmin.from('products').select('id, canonical_name').eq('active', true)
-  const products = catalog || []
+    function normalize(str) {
+      return (str || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()
+    }
+    function matchProduct(name) {
+      const needle = normalize(name)
+      return products.find(p => {
+        const hay = normalize(p.canonical_name)
+        return hay === needle || needle.includes(hay) || hay.includes(needle)
+      }) || null
+    }
 
-  function normalize(str) {
-    return (str || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()
-  }
-  function matchProduct(name) {
-    const needle = normalize(name)
-    return products.find(p => {
-      const hay = normalize(p.canonical_name)
-      return hay === needle || needle.includes(hay) || hay.includes(needle)
-    }) || null
-  }
+    let matched = 0
+    const unmatched = []
+    for (const item of extracted) {
+      if (!item.name || !item.price || item.price <= 0) continue
+      const product = matchProduct(item.name)
+      if (!product) { unmatched.push(item.name); continue }
+      await supabaseAdmin.from('supplier_prices').upsert({
+        supplier_id: supplierId,
+        product_id: product.id,
+        price_php: parseFloat(item.price),
+        active: true
+      }, { onConflict: 'supplier_id,product_id' })
+      matched++
+    }
 
-  let matched = 0
-  const unmatched = []
-  for (const item of extracted) {
-    if (!item.name || !item.price || item.price <= 0) continue
-    const product = matchProduct(item.name)
-    if (!product) { unmatched.push(item.name); continue }
-    await supabaseAdmin.from('supplier_prices').upsert({
-      supplier_id: supplierId,
-      product_id: product.id,
-      price_php: parseFloat(item.price),
-      active: true
-    }, { onConflict: 'supplier_id,product_id' }).catch(() => {})
-    matched++
-  }
+    if (uploadId) {
+      await supabaseAdmin.from('price_list_uploads').update({
+        status: 'completed',
+        products_extracted: extracted.length,
+        products_matched: matched,
+        processed_at: new Date().toISOString()
+      }).eq('id', uploadId)
+    }
 
-  await supabaseAdmin.from('price_list_uploads').update({
-    status: 'completed',
-    products_extracted: extracted.length,
-    products_matched: matched,
-    processed_at: new Date().toISOString()
-  }).eq('id', uploadRecord?.id).catch(() => {})
+    return res.status(201).json({
+      message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed.${unmatched.length ? ` ${unmatched.length} not recognized: ${unmatched.slice(0, 5).join(', ')}${unmatched.length > 5 ? '…' : ''}` : ''}`,
+      extracted: extracted.length,
+      matched,
+      unmatched
+    })
 
-  return res.status(201).json({
-    message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed.${unmatched.length ? ` ${unmatched.length} not recognized: ${unmatched.slice(0, 5).join(', ')}${unmatched.length > 5 ? '…' : ''}` : ''}`,
-    extracted: extracted.length,
-    matched,
-    unmatched
-  })
   } catch (fatalErr) {
     console.error('FATAL price-list error:', fatalErr)
     return res.status(500).json({ error: 'Fatal: ' + (fatalErr.message || String(fatalErr)) })
