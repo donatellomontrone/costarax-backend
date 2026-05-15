@@ -1,8 +1,6 @@
 const formidable = require('formidable')
 const fs = require('fs')
-const path = require('path')
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
-const OpenAI = require('openai')
 
 const CORS_H = {
   'Access-Control-Allow-Origin': '*',
@@ -46,6 +44,8 @@ async function extractText(filePath, mimetype, originalName) {
 
 // ── Ask OpenAI to extract products ───────────────────────────────────────────
 async function extractProductsWithAI(text, supplierName) {
+  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not configured')
+  const OpenAI = require('openai')
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
   const prompt = `You are a data extraction assistant for a Filipino foodservice procurement platform.
