@@ -5,7 +5,6 @@ const CORS_H = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods'
 module.exports = async (req, res) => {
   Object.entries(CORS_H).forEach(([k,v]) => res.setHeader(k,v))
   if (req.method === 'OPTIONS') return res.status(200).end()
-  if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
   const auth = await requireAdmin(req, res)
   if (!auth) return
