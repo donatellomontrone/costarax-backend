@@ -69,9 +69,9 @@ module.exports = async (req, res) => {
       .single()
     const uploadId = uploadRecord?.id || null
 
-    // Check OpenAI key
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: 'OPENAI_API_KEY not configured on server' })
+    // Check Gemini key
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'GEMINI_API_KEY not configured on server' })
     }
 
     let extracted = []
@@ -92,19 +92,23 @@ Supplier: ${supplierName}
 Content:
 ${text.slice(0, 8000)}
 
-Return JSON array only:
+Return JSON array only, no markdown, no explanation:
 [{"name":"Product","price":100,"unit":"kg"},...]`
 
       const aiRes = await httpsPost(
-        'api.openai.com',
-        '/v1/chat/completions',
-        { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
-        { model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 2000 }
+        'generativelanguage.googleapis.com',
+        `/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        { 'Content-Type': 'application/json' },
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 2000 }
+        }
       )
 
-      if (!aiRes.ok) throw new Error(aiRes.body?.error?.message || `OpenAI returned ${aiRes.status}`)
+      if (!aiRes.ok) throw new Error(aiRes.body?.error?.message || `Gemini returned ${aiRes.status}`)
 
-      const content = aiRes.body.choices[0].message.content.trim()
+      const content = aiRes.body.candidates?.[0]?.content?.parts?.[0]?.text?.trim()
+      if (!content) throw new Error('Empty response from Gemini')
       const jsonMatch = content.match(/\[[\s\S]*\]/)
       if (!jsonMatch) throw new Error('No JSON array returned by AI')
       extracted = JSON.parse(jsonMatch[0])
