@@ -132,5 +132,39 @@ module.exports = async (req, res) => {
     return res.status(200).json({ message: 'Order marked as fulfilled' })
   }
 
+  // ── REVIEW ────────────────────────────────────────────────────────────────
+  if (action === 'review') {
+    if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
+
+    const { rating, comment } = req.body || {}
+    if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be between 1 and 5' })
+
+    const { data: quote } = await supabaseAdmin
+      .from('quote_requests').select('buyer_business_id, supplier_id, status').eq('id', id).single()
+    if (!quote) return res.status(404).json({ error: 'Quote not found' })
+    if (quote.status !== 'fulfilled') return res.status(400).json({ error: 'Order must be fulfilled to leave a review' })
+
+    if (auth.profile.role !== 'admin') {
+      let buyerBusinessId = null
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      if (biz) { buyerBusinessId = biz.id } else {
+        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        buyerBusinessId = org?.business_id || null
+      }
+      if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
+    }
+
+    const { error } = await supabaseAdmin.from('reviews').upsert({
+      quote_id: id,
+      buyer_business_id: quote.buyer_business_id,
+      supplier_id: quote.supplier_id,
+      rating: parseInt(rating),
+      comment: comment?.trim() || null
+    }, { onConflict: 'quote_id' })
+
+    if (error) return res.status(500).json({ error: error.message })
+    return res.status(201).json({ message: 'Review submitted' })
+  }
+
   return res.status(404).json({ error: 'Unknown action' })
 }
