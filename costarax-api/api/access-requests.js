@@ -14,33 +14,43 @@ module.exports = async (req, res) => {
 
   try {
     const body = req.body || {}
-    const company_name  = (body.company_name || '').trim()
-    const contact_email = (body.contact_email || '').trim().toLowerCase()
-    const business_type = (body.business_type || '').trim()
-    const tin           = (body.tin || '').trim() || null
-    const contact_phone = (body.contact_phone || '').trim() || null
+    const company_name   = (body.company_name || '').trim()
+    const contact_email  = (body.contact_email || '').trim().toLowerCase()
+    const business_type  = (body.business_type || '').trim()
+    const tin            = (body.tin || '').trim() || null
+    const contact_phone  = (body.contact_phone || '').trim() || null
     const requested_role = body.requested_role === 'supplier' ? 'supplier' : 'buyer'
 
-    if (!contact_email) return res.status(400).json({ error: 'contact_email is required' })
-    if (!company_name)  return res.status(400).json({ error: 'company_name is required' })
-    if (!business_type) return res.status(400).json({ error: 'business_type is required' })
+    if (!contact_email)  return res.status(400).json({ error: 'contact_email is required' })
+    if (!company_name)   return res.status(400).json({ error: 'company_name is required' })
+    if (!business_type)  return res.status(400).json({ error: 'business_type is required' })
 
-    const id = body.id || undefined  // use client-provided UUID if available
-    const insertData = { requested_role, company_name, business_type, contact_email, tin, contact_phone }
-    if (id) insertData.id = id
-    const { data, error } = await supabaseAdmin
+    // Insert without custom id — let DB generate it
+    const { error: insertErr } = await supabaseAdmin
       .from('access_requests')
-      .insert(insertData)
-      .select('id')
-      .single()
+      .insert({ requested_role, company_name, business_type, contact_email, tin, contact_phone })
 
-    if (error) {
-      console.error('Insert error code:', error.code, 'message:', error.message)
-      if (error.code === '23505') {
+    if (insertErr) {
+      if (insertErr.code === '23505') {
+        // Already exists — find existing id to allow document re-upload
+        const { data: existing } = await supabaseAdmin
+          .from('access_requests').select('id').eq('contact_email', contact_email).single()
+        if (existing?.id) {
+          return res.status(200).json({ id: existing.id, message: 'Request already submitted — documents will be added to your existing request.' })
+        }
         return res.status(409).json({ error: 'This email has already submitted a request' })
       }
-      return res.status(500).json({ error: error.message })
+      return res.status(500).json({ error: insertErr.message })
     }
+
+    // Fetch the just-inserted id by email
+    const { data: inserted } = await supabaseAdmin
+      .from('access_requests')
+      .select('id')
+      .eq('contact_email', contact_email)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single()
 
     // Notify admin
     if (process.env.EMAIL_USER) {
@@ -48,10 +58,13 @@ module.exports = async (req, res) => {
       await sendEmail({ to: process.env.EMAIL_USER, ...tpl }).catch(() => {})
     }
 
-    return res.status(201).json({ id: data.id, message: 'Access request submitted successfully' })
+    return res.status(201).json({
+      id: inserted?.id || null,
+      message: 'Access request submitted successfully'
+    })
 
   } catch (err) {
-    console.error('Unexpected error:', err.message, err.stack)
+    console.error('Unexpected error:', err.message)
     return res.status(500).json({ error: 'Internal server error: ' + err.message })
   }
 }
