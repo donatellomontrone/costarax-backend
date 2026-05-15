@@ -24,9 +24,15 @@ module.exports = async (req, res) => {
     if (!quote) return res.status(404).json({ error: 'Quote not found' })
 
     if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
+      let buyerBusinessId = null
       const { data: biz } = await supabaseAdmin
         .from('businesses').select('id').eq('contact_email', auth.user.email).single()
-      if (!biz || biz.id !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
+      if (biz) { buyerBusinessId = biz.id } else {
+        const { data: org } = await supabaseAdmin
+          .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        buyerBusinessId = org?.business_id || null
+      }
+      if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
     } else if (auth.profile.role === 'supplier') {
       const { data: org } = await supabaseAdmin
         .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
