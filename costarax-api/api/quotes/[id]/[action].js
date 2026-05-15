@@ -136,8 +136,10 @@ module.exports = async (req, res) => {
   if (action === 'review') {
     if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
 
-    const { rating, comment } = req.body || {}
-    if (!rating || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be between 1 and 5' })
+    const { order_rating, delivery_rating, comment } = req.body || {}
+    const or = parseInt(order_rating), dr = parseInt(delivery_rating)
+    if (!or || or < 1 || or > 5) return res.status(400).json({ error: 'Order rating must be between 1 and 5' })
+    if (!dr || dr < 1 || dr > 5) return res.status(400).json({ error: 'Delivery rating must be between 1 and 5' })
 
     const { data: quote } = await supabaseAdmin
       .from('quote_requests').select('buyer_business_id, supplier_id, status').eq('id', id).single()
@@ -154,11 +156,14 @@ module.exports = async (req, res) => {
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
     }
 
+    const avgRating = Math.round((or + dr) / 2)
     const { error } = await supabaseAdmin.from('reviews').upsert({
       quote_id: id,
       buyer_business_id: quote.buyer_business_id,
       supplier_id: quote.supplier_id,
-      rating: parseInt(rating),
+      rating: avgRating,
+      order_rating: or,
+      delivery_rating: dr,
       comment: comment?.trim() || null
     }, { onConflict: 'quote_id' })
 
