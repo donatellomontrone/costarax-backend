@@ -97,7 +97,7 @@ Return JSON array only, no markdown, no explanation:
 
       const aiRes = await httpsPost(
         'generativelanguage.googleapis.com',
-        `/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        `/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
         { 'Content-Type': 'application/json' },
         {
           contents: [{ parts: [{ text: prompt }] }],
