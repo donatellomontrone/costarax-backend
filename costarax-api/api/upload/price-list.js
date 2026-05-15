@@ -50,9 +50,6 @@ module.exports = async (req, res) => {
 
   let extracted = []
   try {
-    const OpenAI = require('openai')
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-
     const prompt = `You are a data extraction assistant for a Filipino foodservice procurement platform.
 
 Extract all products and prices from this supplier price list. Return ONLY a valid JSON array.
@@ -72,14 +69,22 @@ ${text.slice(0, 8000)}
 Return JSON array only:
 [{"name":"Product","price":100,"unit":"kg"},...]`
 
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-      max_tokens: 2000
+    const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 2000
+      })
     })
-
-    const content = response.choices[0].message.content.trim()
+    const aiData = await aiRes.json()
+    if (!aiRes.ok) throw new Error(aiData.error?.message || 'OpenAI error')
+    const content = aiData.choices[0].message.content.trim()
     const jsonMatch = content.match(/\[[\s\S]*\]/)
     if (!jsonMatch) throw new Error('No JSON returned by AI')
     extracted = JSON.parse(jsonMatch[0])
