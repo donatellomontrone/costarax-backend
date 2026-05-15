@@ -63,4 +63,30 @@ function accessApprovedEmail({ companyName, contactEmail }) {
   }
 }
 
-module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail }
+function orderConfirmedEmail({ supplierName, buyerName, orderNotes }) {
+  return {
+    subject: `Order confirmed by ${buyerName} — Costarax`,
+    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
+      <h2 style="color:#1A5C3A;margin:0 0 16px">Order confirmed</h2>
+      <p><strong>${buyerName}</strong> has confirmed an order from your quote reply.</p>
+      ${orderNotes ? `<div style="background:#EAF3EE;border-left:4px solid #1A5C3A;padding:14px;margin:16px 0;border-radius:0 6px 6px 0;"><strong>Delivery notes:</strong><br>${orderNotes}</div>` : ''}
+      <p style="color:#6B7280;font-size:14px">Please prepare the delivery according to the agreed terms. Mark the order as fulfilled once delivered.</p>
+      <a href="${process.env.APP_URL || 'https://costarax.vercel.app'}/app.html" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">View order on Costarax</a>
+    </div>`
+  }
+}
+
+function orderFulfilledEmail({ buyerName, supplierName, products }) {
+  return {
+    subject: `Your order has been fulfilled by ${supplierName} — Costarax`,
+    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
+      <h2 style="color:#1A5C3A;margin:0 0 16px">Order fulfilled</h2>
+      <p><strong>${supplierName}</strong> has marked your order as fulfilled.</p>
+      ${products ? `<p><strong>Products:</strong> ${products}</p>` : ''}
+      <p style="color:#6B7280;font-size:14px">If you have any issues with this delivery, please contact your supplier directly.</p>
+      <a href="${process.env.APP_URL || 'https://costarax.vercel.app'}/app.html" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">View on Costarax</a>
+    </div>`
+  }
+}
+
+module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail, orderConfirmedEmail, orderFulfilledEmail }
