@@ -152,10 +152,11 @@ JSON:`
       const canonicalName = (item.canonical || item.name).trim()
       const category_id = VALID_CATEGORIES.includes(item.category) ? item.category : 'dry'
       const product = matchProduct(canonicalName)
+      const unit = (item.unit || 'kg').trim()
       if (product) {
-        priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), active: true })
+        priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), unit, active: true })
       } else {
-        toCreate.push({ canonical_name: canonicalName, category_id, active: true, _price: parseFloat(item.price) })
+        toCreate.push({ canonical_name: canonicalName, category_id, default_unit: unit, active: true, _price: parseFloat(item.price), _unit: unit })
       }
     }
 
@@ -164,20 +165,22 @@ JSON:`
     let insertError = null
     let upsertError = null
     if (toCreate.length) {
-      const insertPayload = toCreate.map(({ _price, ...p }) => p)
+      const insertPayload = toCreate.map(({ _price, _unit, ...p }) => p)
       const { data: newProducts, error: iErr } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
       insertError = iErr?.message || null
       if (newProducts) {
         created = newProducts.length
         newProducts.forEach((np, i) => {
-          priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, active: true })
+          priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, unit: toCreate[i]._unit, active: true })
         })
       }
     }
 
-    // Bulk-upsert all prices in one query
-    if (priceRows.length) {
-      const { error: uErr } = await supabaseAdmin.from('supplier_prices').upsert(priceRows, { onConflict: 'supplier_id,product_id' })
+    // Replace supplier prices: delete old rows for this supplier+products, then insert fresh
+    if (priceRows.length && supplierId) {
+      const productIds = priceRows.map(r => r.product_id)
+      await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId).in('product_id', productIds)
+      const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(priceRows)
       upsertError = uErr?.message || null
     }
 
