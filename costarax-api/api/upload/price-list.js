@@ -162,7 +162,7 @@ Return JSON array only, no markdown, no explanation:
       if (product) {
         priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), unit: item.unit || null, active: true })
       } else {
-        toCreate.push({ canonical_name: canonicalName, unit: item.unit || 'kg', category: 'uncategorized', active: true, _price: parseFloat(item.price), _unit: item.unit || null })
+        toCreate.push({ canonical_name: canonicalName, active: true, _price: parseFloat(item.price), _unit: item.unit || null })
       }
     }
 
