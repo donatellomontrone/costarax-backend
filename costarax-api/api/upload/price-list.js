@@ -76,27 +76,14 @@ module.exports = async (req, res) => {
 
     let extracted = []
     try {
-      const prompt = `You are a data extraction assistant for a Filipino foodservice procurement platform.
-
-Extract all products and prices from this supplier price list. Return ONLY a valid JSON array.
-
-Rules:
-- Each item must have: "name", "canonical", "price", "unit"
-- "name": original product name as written in the list
-- "canonical": standardized English name, fully expanded, no abbreviations, title case.
-  Examples: "D-rump mb 2+" → "Wagyu D-Rump Marble Grade 2", "mb3" → "Marble Grade 3",
-  "Picanha" → "Rump Cap Picanha", "lchx" → "Whole Chicken", "liempo" → "Pork Belly"
-- "price": number (PHP per unit). Ranges like "120-130" → use lower value 120
-- "unit": normalized unit — kg, g, pc, box, case, liter, dozen, bag, tray
-- Skip items with no price
-
+      const prompt = `Extract products from this price list. Return JSON array only.
+Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc"}
+Skip items without price. Ranges: use lower value.
 Supplier: ${supplierName}
-
-Content:
-${text.slice(0, 4000)}
-
-Return JSON array only, no markdown, no explanation:
-[{"name":"D-rump mb 2+","canonical":"Wagyu D-Rump Marble Grade 2","price":100,"unit":"kg"},...]`
+---
+${text.slice(0, 2000)}
+---
+JSON:`
 
       const aiRes = await httpsPost(
         'api.groq.com',
