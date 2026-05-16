@@ -8,85 +8,140 @@ const transporter = nodemailer.createTransport({
 })
 
 async function sendEmail({ to, subject, html }) {
-  if (!process.env.EMAIL_USER) { console.log('[Email skipped]', { to, subject }); return { ok: true } }
+  if (!process.env.EMAIL_USER) { console.log('[Email skipped — no SMTP configured]', { to, subject }); return { ok: true } }
   try {
     await transporter.sendMail({ from: process.env.EMAIL_FROM || 'Costarax <noreply@costarax.ph>', to, subject, html })
     return { ok: true }
-  } catch (err) { console.error('[Email error]', err.message); return { ok: false } }
+  } catch (err) { console.error('[Email error]', err.message); return { ok: false, error: err.message } }
 }
 
+const APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.vercel.app'
+
+// ── Shared layout ─────────────────────────────────────────────────────────────
+function layout(title, bodyHtml) {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>${title}</title></head>
+<body style="margin:0;padding:0;background:#F8F7F4;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F8F7F4;padding:32px 0;">
+  <tr><td align="center">
+    <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#FFFFFF;border:1px solid #E2E0DA;border-radius:10px;overflow:hidden;">
+      <!-- Header -->
+      <tr>
+        <td style="background:#1A5C3A;padding:22px 32px;border-radius:10px 10px 0 0;">
+          <span style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.02em;">Costara<span style="color:#C8873A;">x</span></span>
+        </td>
+      </tr>
+      <!-- Body -->
+      <tr><td style="padding:32px 32px 24px;">${bodyHtml}</td></tr>
+      <!-- Footer -->
+      <tr>
+        <td style="padding:16px 32px 24px;border-top:1px solid #E2E0DA;">
+          <p style="margin:0;font-size:12px;color:#9A9890;line-height:1.6;">
+            This is an automated message from Costarax — Private AI Supplier Price Intelligence for Philippine Businesses.<br>
+            If you have questions, reply to <a href="mailto:hello@costarax.com" style="color:#1A5C3A;">hello@costarax.com</a>
+          </p>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>`
+}
+
+function btn(href, label) {
+  return `<a href="${href}" style="display:inline-block;margin-top:20px;background:#1A5C3A;color:#ffffff;padding:13px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:14px;letter-spacing:0.02em;">${label}</a>`
+}
+function h2(text) {
+  return `<h2 style="margin:0 0 16px;font-size:20px;font-weight:800;color:#18170F;letter-spacing:-0.01em;">${text}</h2>`
+}
+function p(text) {
+  return `<p style="margin:0 0 12px;font-size:14px;color:#3D3C38;line-height:1.65;">${text}</p>`
+}
+function highlight(text) {
+  return `<div style="background:#EAF3EE;border-left:4px solid #1A5C3A;padding:14px 16px;margin:16px 0;border-radius:0 6px 6px 0;font-size:14px;color:#123F28;line-height:1.65;">${text}</div>`
+}
+function row(label, value) {
+  return `<tr><td style="padding:6px 0;font-size:13px;color:#7A7870;width:140px;">${label}</td><td style="padding:6px 0;font-size:13px;color:#18170F;font-weight:600;">${value}</td></tr>`
+}
+function table(...rows) {
+  return `<table width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;">${rows.join('')}</table>`
+}
+
+// ── Templates ─────────────────────────────────────────────────────────────────
+
 function quoteReceivedEmail({ supplierName, buyerName, products, message }) {
-  return {
-    subject: `New quote request from ${buyerName} — Costarax`,
-    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
-      <h2 style="color:#1A5C3A;margin:0 0 16px">New quote request on Costarax</h2>
-      <p><strong>From:</strong> ${buyerName}</p>
-      <p><strong>Products:</strong> ${products}</p>
-      <p><strong>Message:</strong> ${message}</p>
-      <a href="${process.env.APP_URL || 'https://costarax.vercel.app'}/app.html?role=supplier" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">Reply on Costarax</a>
-    </div>`
-  }
+  const body = `
+    ${h2('New quote request')}
+    ${p(`<strong>${buyerName}</strong> has sent you a quote request on Costarax.`)}
+    ${table(
+      row('From:', buyerName || '—'),
+      row('Products:', products || '—'),
+      row('Message:', message || '—')
+    )}
+    ${btn(`${APP_URL}/app.html?role=supplier`, 'Reply on Costarax')}
+  `
+  return { subject: `New quote request from ${buyerName} — Costarax`, html: layout('New quote request — Costarax', body) }
 }
 
 function quoteRepliedEmail({ buyerName, supplierName, reply }) {
-  return {
-    subject: `${supplierName} replied to your quote — Costarax`,
-    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
-      <h2 style="color:#1A5C3A;margin:0 0 16px">Quote reply received</h2>
-      <p><strong>${supplierName}</strong> replied to your request:</p>
-      <div style="background:#EAF3EE;border-left:4px solid #1A5C3A;padding:14px;margin:16px 0;border-radius:0 6px 6px 0;">${reply}</div>
-      <a href="${process.env.APP_URL || 'https://costarax.vercel.app'}/app.html?role=business" style="display:inline-block;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">View on Costarax</a>
-    </div>`
-  }
+  const body = `
+    ${h2('Quote reply received')}
+    ${p(`<strong>${supplierName}</strong> has replied to your quote request.`)}
+    ${highlight(reply || '—')}
+    ${btn(`${APP_URL}/app.html?role=business`, 'View quote on Costarax')}
+  `
+  return { subject: `${supplierName} replied to your quote — Costarax`, html: layout('Quote reply — Costarax', body) }
 }
 
 function accessRequestEmail({ companyName, contactEmail, businessType }) {
-  return {
-    subject: `New access request: ${companyName} — Costarax`,
-    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
-      <h2 style="margin:0 0 16px">New access request</h2>
-      <p><strong>Company:</strong> ${companyName}</p>
-      <p><strong>Email:</strong> ${contactEmail}</p>
-      <p><strong>Type:</strong> ${businessType || 'Not specified'}</p>
-    </div>`
-  }
+  const body = `
+    ${h2('New access request')}
+    ${p('A new business has submitted a request for platform access.')}
+    ${table(
+      row('Company:', companyName || '—'),
+      row('Email:', contactEmail || '—'),
+      row('Type:', businessType || 'Not specified')
+    )}
+    ${btn(`${APP_URL}/app.html?role=admin`, 'Review in Admin Panel')}
+  `
+  return { subject: `New access request: ${companyName} — Costarax`, html: layout('New access request — Costarax', body) }
 }
 
 function accessApprovedEmail({ companyName, contactEmail }) {
-  return {
-    subject: `Your Costarax access has been approved`,
-    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
-      <h2 style="color:#1A5C3A;margin:0 0 16px">Welcome to Costarax, ${companyName}!</h2>
-      <p>Your account has been verified and activated. Login with: <strong>${contactEmail}</strong></p>
-      <a href="${process.env.APP_URL || 'https://costarax.vercel.app'}/login.html" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;">Sign in to Costarax</a>
-    </div>`
-  }
+  const body = `
+    ${h2(`Welcome to Costarax, ${companyName}!`)}
+    ${p('Your business has been verified and your account is now active.')}
+    ${highlight('Check your inbox for a separate <strong>invitation email</strong> from Costarax. Click the link in that email to set your password and sign in.')}
+    ${table(
+      row('Login email:', contactEmail || '—'),
+      row('Platform:', `<a href="${APP_URL}/login.html" style="color:#1A5C3A;">${APP_URL}/login.html</a>`)
+    )}
+    ${btn(`${APP_URL}/login.html`, 'Go to Costarax Login')}
+    ${p('<span style="font-size:12px;color:#7A7870;">Didn\'t receive the invitation email? Check your spam folder or contact us at hello@costarax.com</span>')}
+  `
+  return { subject: 'Your Costarax access has been approved', html: layout('Access approved — Costarax', body) }
 }
 
 function orderConfirmedEmail({ supplierName, buyerName, orderNotes }) {
-  return {
-    subject: `Order confirmed by ${buyerName} — Costarax`,
-    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
-      <h2 style="color:#1A5C3A;margin:0 0 16px">Order confirmed</h2>
-      <p><strong>${buyerName}</strong> has confirmed an order from your quote reply.</p>
-      ${orderNotes ? `<div style="background:#EAF3EE;border-left:4px solid #1A5C3A;padding:14px;margin:16px 0;border-radius:0 6px 6px 0;"><strong>Delivery notes:</strong><br>${orderNotes}</div>` : ''}
-      <p style="color:#6B7280;font-size:14px">Please prepare the delivery according to the agreed terms. Mark the order as fulfilled once delivered.</p>
-      <a href="${process.env.APP_URL || 'https://costarax.vercel.app'}/app.html" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">View order on Costarax</a>
-    </div>`
-  }
+  const body = `
+    ${h2('Order confirmed')}
+    ${p(`<strong>${buyerName}</strong> has confirmed an order from your quote reply.`)}
+    ${orderNotes ? highlight(`<strong>Delivery notes:</strong><br>${orderNotes}`) : ''}
+    ${p('Please prepare the delivery according to the agreed terms.')}
+    ${btn(`${APP_URL}/app.html?role=supplier`, 'View order on Costarax')}
+  `
+  return { subject: `Order confirmed by ${buyerName} — Costarax`, html: layout('Order confirmed — Costarax', body) }
 }
 
 function orderFulfilledEmail({ buyerName, supplierName, products }) {
-  return {
-    subject: `Your order has been fulfilled by ${supplierName} — Costarax`,
-    html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px;border:1px solid #E2E0DA;border-radius:8px;">
-      <h2 style="color:#1A5C3A;margin:0 0 16px">Order fulfilled</h2>
-      <p><strong>${supplierName}</strong> has marked your order as fulfilled.</p>
-      ${products ? `<p><strong>Products:</strong> ${products}</p>` : ''}
-      <p style="color:#6B7280;font-size:14px">If you have any issues with this delivery, please contact your supplier directly.</p>
-      <a href="${process.env.APP_URL || 'https://costarax.vercel.app'}/app.html" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">View on Costarax</a>
-    </div>`
-  }
+  const body = `
+    ${h2('Order fulfilled')}
+    ${p(`<strong>${supplierName}</strong> has marked your order as fulfilled.`)}
+    ${products ? table(row('Products:', products)) : ''}
+    ${p('If you have any issues with this delivery, please contact your supplier directly through the platform.')}
+    ${btn(`${APP_URL}/app.html?role=business`, 'View on Costarax')}
+  `
+  return { subject: `Your order has been fulfilled by ${supplierName} — Costarax`, html: layout('Order fulfilled — Costarax', body) }
 }
 
 module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail, orderConfirmedEmail, orderFulfilledEmail }
