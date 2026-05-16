@@ -11,6 +11,7 @@ const CORS_H = {
 exports.config = { api: { bodyParser: false } }
 
 module.exports = async (req, res) => {
+  try {
   Object.entries(CORS_H).forEach(([k,v]) => res.setHeader(k,v))
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
@@ -65,4 +66,8 @@ module.exports = async (req, res) => {
   }
 
   return res.status(201).json({ uploaded: results.length, files: results })
+  } catch (fatalErr) {
+    console.error('[upload/access-request-doc] Unhandled error:', fatalErr.message, fatalErr.stack)
+    return res.status(500).json({ error: 'Internal server error', detail: fatalErr.message })
+  }
 }
