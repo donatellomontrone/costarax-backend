@@ -144,15 +144,37 @@ Return JSON array only, no markdown, no explanation:
     }
 
     let matched = 0
-    const unmatched = []
+    let created = 0
+    const failed = []
     for (const item of extracted) {
       if (!item.name || !item.price || item.price <= 0) continue
-      const product = matchProduct(item.name)
-      if (!product) { unmatched.push(item.name); continue }
+
+      let product = matchProduct(item.name)
+
+      // Auto-create product if not in catalog
+      if (!product) {
+        const { data: newProduct } = await supabaseAdmin.from('products').insert({
+          canonical_name: item.name.trim(),
+          unit: item.unit || 'kg',
+          category: 'uncategorized',
+          active: true
+        }).select('id, canonical_name').single()
+
+        if (newProduct) {
+          products.push(newProduct) // add to local cache for dedup
+          product = newProduct
+          created++
+        } else {
+          failed.push(item.name)
+          continue
+        }
+      }
+
       await supabaseAdmin.from('supplier_prices').upsert({
         supplier_id: supplierId,
         product_id: product.id,
         price_php: parseFloat(item.price),
+        unit: item.unit || null,
         active: true
       }, { onConflict: 'supplier_id,product_id' })
       matched++
@@ -168,10 +190,11 @@ Return JSON array only, no markdown, no explanation:
     }
 
     return res.status(201).json({
-      message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed.${unmatched.length ? ` ${unmatched.length} not recognized: ${unmatched.slice(0, 5).join(', ')}${unmatched.length > 5 ? '…' : ''}` : ''}`,
+      message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed (${created} new added to catalog).${failed.length ? ` ${failed.length} failed: ${failed.slice(0, 3).join(', ')}` : ''}`,
       extracted: extracted.length,
       matched,
-      unmatched
+      created,
+      failed
     })
 
   } catch (fatalErr) {
