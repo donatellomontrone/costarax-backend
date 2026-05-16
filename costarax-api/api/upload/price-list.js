@@ -77,8 +77,9 @@ module.exports = async (req, res) => {
     let extracted = []
     try {
       const prompt = `Extract products from this price list. Return JSON array only.
-Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc"}
-Skip items without price. Ranges: use lower value.
+Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging"}
+Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2).
+Category rules: meat=pork/beef/chicken/poultry, seafood=fish/shrimp/squid, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices, beverages=drinks/juice/water, packaging=boxes/bags/containers.
 Supplier: ${supplierName}
 ---
 ${text.slice(0, 2000)}
@@ -142,17 +143,19 @@ JSON:`
     }
 
     // Separate items into matched vs needs-creation
+    const VALID_CATEGORIES = ['meat', 'seafood', 'produce', 'dry', 'beverages', 'packaging']
     const validItems = extracted.filter(i => i.name && i.price && i.price > 0)
     const toCreate = []
     const priceRows = []
 
     for (const item of validItems) {
       const canonicalName = (item.canonical || item.name).trim()
+      const category_id = VALID_CATEGORIES.includes(item.category) ? item.category : 'dry'
       const product = matchProduct(canonicalName)
       if (product) {
         priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), active: true })
       } else {
-        toCreate.push({ canonical_name: canonicalName, active: true, _price: parseFloat(item.price) })
+        toCreate.push({ canonical_name: canonicalName, category_id, active: true, _price: parseFloat(item.price) })
       }
     }
 
