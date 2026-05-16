@@ -110,7 +110,7 @@ module.exports = async (req, res) => {
           await sendEmail({ to: sp.email, ...tpl })
         }
       }
-    } catch(e) { console.log('Email error:', e.message) }
+    } catch(e) { console.error('Email error:', e.message) }
 
     return res.status(201).json({ id: quote.id, message: 'Quote request sent' })
   }

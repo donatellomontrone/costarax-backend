@@ -27,11 +27,11 @@ async function requireAuth(req, res) {
   const { data: profile, error: profileErr } = await supabaseAdmin
     .from('profiles').select('role,status').eq('id', user.id).single()
  
-  // If profile fetch fails, fall back to user metadata
+  // If profile row is missing, reject — do not fabricate an approved profile
   if (profileErr || !profile) {
-    console.log('Profile fetch failed:', profileErr?.message, 'user:', user.id)
-    const meta = user.user_metadata || {}
-    return { user, profile: { role: meta.role || 'buyer', status: 'approved' } }
+    console.error('Profile fetch failed:', profileErr?.message, 'user:', user.id)
+    res.status(403).json({ error: 'Account setup incomplete. Please contact support.' })
+    return null
   }
  
   if (profile.status && profile.status !== 'approved') {

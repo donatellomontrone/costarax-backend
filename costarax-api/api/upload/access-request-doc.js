@@ -28,6 +28,12 @@ module.exports = async (req, res) => {
 
   if (!accessRequestId) return res.status(400).json({ error: 'access_request_id is required' })
 
+  // Validate that the access request exists and is still pending — prevents uploads against arbitrary UUIDs
+  const { data: accessRequest, error: arErr } = await supabaseAdmin
+    .from('access_requests').select('id, status').eq('id', accessRequestId).single()
+  if (arErr || !accessRequest) return res.status(404).json({ error: 'Access request not found' })
+  if (accessRequest.status !== 'pending') return res.status(400).json({ error: 'Access request is no longer pending' })
+
   const fileArr = Array.isArray(files.file) ? files.file : [files.file].filter(Boolean)
   const results = []
 

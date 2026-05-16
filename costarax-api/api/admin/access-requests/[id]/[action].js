@@ -42,9 +42,15 @@ module.exports = async (req, res) => {
     const isSupplier = request.requested_role === 'supplier'
 
     if (isSupplier) {
+      const CATEGORY_MAP = {
+        produce: 'produce', seafood: 'seafood', meat: 'meat',
+        dairy: 'dairy', dry_goods: 'dry_goods', beverages: 'beverages'
+      }
+      const supplierCategory = CATEGORY_MAP[request.business_type] || 'general'
+
       const { data: supplier, error: supErr } = await supabaseAdmin.from('suppliers').insert({
         name: request.company_name, legal_name: request.company_name,
-        category: 'produce',
+        category: supplierCategory,
         tagline: `${request.business_type || 'Supplier'} — Philippines`,
         city: request.city || null, region: request.region || null,
         tin: request.tin || null, contact_phone: request.contact_phone || null,
@@ -60,11 +66,11 @@ module.exports = async (req, res) => {
           redirectTo: `${process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.vercel.app'}/login.html`
         }
       )
-      let userId = invite?.user?.id
       if (inviteErr) {
-        const { data: existingUsers } = await supabaseAdmin.auth.admin.listUsers()
-        userId = existingUsers?.users?.find(u => u.email === request.contact_email)?.id
+        console.error('Invite failed for supplier:', request.contact_email, inviteErr.message)
+        return res.status(500).json({ error: `Invite failed: ${inviteErr.message}. Please retry or check the email address.` })
       }
+      const userId = invite?.user?.id
 
       if (userId) {
         await supabaseAdmin.from('profiles').upsert({
@@ -111,11 +117,11 @@ module.exports = async (req, res) => {
           redirectTo: `${process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.vercel.app'}/login.html`
         }
       )
-      let userId = invite?.user?.id
       if (inviteErr) {
-        const { data: existingUsers } = await supabaseAdmin.auth.admin.listUsers()
-        userId = existingUsers?.users?.find(u => u.email === request.contact_email)?.id
+        console.error('Invite failed for buyer:', request.contact_email, inviteErr.message)
+        return res.status(500).json({ error: `Invite failed: ${inviteErr.message}. Please retry or check the email address.` })
       }
+      const userId = invite?.user?.id
 
       if (userId) {
         await supabaseAdmin.from('profiles').upsert({

@@ -28,10 +28,13 @@ module.exports = async (req, res) => {
   const rawBody = await getRawBody(req)
   const signature = req.headers['paymongo-signature']
 
-  if (process.env.PAYMONGO_WEBHOOK_SECRET && signature) {
-    if (!verifySignature(rawBody.toString(), signature, process.env.PAYMONGO_WEBHOOK_SECRET)) {
-      return res.status(400).json({ error: 'Invalid signature' })
-    }
+  if (!process.env.PAYMONGO_WEBHOOK_SECRET) {
+    console.error('PAYMONGO_WEBHOOK_SECRET not configured — rejecting webhook')
+    return res.status(500).json({ error: 'Webhook secret not configured' })
+  }
+
+  if (!signature || !verifySignature(rawBody.toString(), signature, process.env.PAYMONGO_WEBHOOK_SECRET)) {
+    return res.status(400).json({ error: 'Invalid signature' })
   }
 
   let event
@@ -93,7 +96,7 @@ module.exports = async (req, res) => {
         })
       }
 
-      console.log(`Supplier ${sub.supplier_id} activated after payment`)
+      console.info(`Supplier ${sub.supplier_id} activated after payment`)
     }
   }
 
@@ -115,7 +118,7 @@ module.exports = async (req, res) => {
         await supabaseAdmin.from('subscriptions').update({
           status: 'past_due', last_payment_status: 'failed'
         }).eq('supplier_id', sub.supplier_id)
-        console.log(`Supplier ${sub.supplier_id} suspended — payment failed`)
+        console.info(`Supplier ${sub.supplier_id} suspended — payment failed`)
       }
     }
   }
