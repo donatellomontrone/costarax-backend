@@ -64,7 +64,7 @@ module.exports = async (req, res) => {
     // Record upload (Supabase v2 never throws — no .catch() needed)
     const { data: uploadRecord } = await supabaseAdmin
       .from('price_list_uploads')
-      .insert({ supplier_id: supplierId, file_name: file_name || 'price-list', status: 'processing' })
+      .insert({ supplier_id: supplierId, file_name: file_name || 'price-list', status: 'uploaded' })
       .select('id')
       .single()
     const uploadId = uploadRecord?.id || null
@@ -143,7 +143,7 @@ JSON:`
     } catch (e) {
       if (uploadId) {
         await supabaseAdmin.from('price_list_uploads').update({
-          status: 'error', ai_summary: JSON.stringify({ error: e.message })
+          status: 'rejected', ai_summary: JSON.stringify({ error: e.message })
         }).eq('id', uploadId)
       }
       return res.status(500).json({ error: 'AI extraction failed: ' + e.message })
@@ -220,7 +220,7 @@ JSON:`
 
     if (uploadId) {
       await supabaseAdmin.from('price_list_uploads').update({
-        status: 'completed',
+        status: 'needs_review',
         ai_summary: JSON.stringify({ extracted: extracted.length, matched, created, error: upsertError || insertError || null })
       }).eq('id', uploadId)
     }
