@@ -168,9 +168,12 @@ Return JSON array only, no markdown, no explanation:
 
     // Bulk-insert new products in one query
     let created = 0
+    let insertError = null
+    let upsertError = null
     if (toCreate.length) {
       const insertPayload = toCreate.map(({ _price, _unit, ...p }) => p)
-      const { data: newProducts } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
+      const { data: newProducts, error: iErr } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
+      insertError = iErr?.message || null
       if (newProducts) {
         created = newProducts.length
         newProducts.forEach((np, i) => {
@@ -181,7 +184,8 @@ Return JSON array only, no markdown, no explanation:
 
     // Bulk-upsert all prices in one query
     if (priceRows.length) {
-      await supabaseAdmin.from('supplier_prices').upsert(priceRows, { onConflict: 'supplier_id,product_id' })
+      const { error: uErr } = await supabaseAdmin.from('supplier_prices').upsert(priceRows, { onConflict: 'supplier_id,product_id' })
+      upsertError = uErr?.message || null
     }
 
     const matched = priceRows.length
@@ -199,9 +203,14 @@ Return JSON array only, no markdown, no explanation:
     return res.status(201).json({
       message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed (${created} new added to catalog).${failed.length ? ` ${failed.length} failed: ${failed.slice(0, 3).join(', ')}` : ''}`,
       extracted: extracted.length,
+      validItems: validItems.length,
+      toCreate: toCreate.length,
       matched,
       created,
-      failed
+      failed,
+      insertError,
+      upsertError,
+      sampleExtracted: extracted.slice(0, 2)
     })
 
   } catch (fatalErr) {
