@@ -160,9 +160,9 @@ Return JSON array only, no markdown, no explanation:
       const canonicalName = (item.canonical || item.name).trim()
       const product = matchProduct(canonicalName)
       if (product) {
-        priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), unit: item.unit || null, active: true })
+        priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), active: true })
       } else {
-        toCreate.push({ canonical_name: canonicalName, active: true, _price: parseFloat(item.price), _unit: item.unit || null })
+        toCreate.push({ canonical_name: canonicalName, active: true, _price: parseFloat(item.price) })
       }
     }
 
@@ -171,13 +171,13 @@ Return JSON array only, no markdown, no explanation:
     let insertError = null
     let upsertError = null
     if (toCreate.length) {
-      const insertPayload = toCreate.map(({ _price, _unit, ...p }) => p)
+      const insertPayload = toCreate.map(({ _price, ...p }) => p)
       const { data: newProducts, error: iErr } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
       insertError = iErr?.message || null
       if (newProducts) {
         created = newProducts.length
         newProducts.forEach((np, i) => {
-          priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, unit: toCreate[i]._unit, active: true })
+          priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, active: true })
         })
       }
     }
