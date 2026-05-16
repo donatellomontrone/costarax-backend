@@ -143,7 +143,7 @@ JSON:`
     } catch (e) {
       if (uploadId) {
         await supabaseAdmin.from('price_list_uploads').update({
-          status: 'error', error_message: e.message, processed_at: new Date().toISOString()
+          status: 'error', ai_summary: JSON.stringify({ error: e.message })
         }).eq('id', uploadId)
       }
       return res.status(500).json({ error: 'AI extraction failed: ' + e.message })
@@ -221,9 +221,7 @@ JSON:`
     if (uploadId) {
       await supabaseAdmin.from('price_list_uploads').update({
         status: 'completed',
-        products_extracted: extracted.length,
-        products_matched: matched,
-        processed_at: new Date().toISOString()
+        ai_summary: JSON.stringify({ extracted: extracted.length, matched, created, error: upsertError || insertError || null })
       }).eq('id', uploadId)
     }
 
