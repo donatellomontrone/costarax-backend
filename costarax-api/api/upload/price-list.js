@@ -81,11 +81,14 @@ module.exports = async (req, res) => {
 Extract all products and prices from this supplier price list. Return ONLY a valid JSON array.
 
 Rules:
-- Each item: "name" (string), "price" (number PHP per unit), "unit" (string)
-- Normalize units: kg, g, pc, box, case, liter, dozen, bag, tray
-- Convert price ranges to the lower value (e.g. "120-130" → 120)
+- Each item must have: "name", "canonical", "price", "unit"
+- "name": original product name as written in the list
+- "canonical": standardized English name, fully expanded, no abbreviations, title case.
+  Examples: "D-rump mb 2+" → "Wagyu D-Rump Marble Grade 2", "mb3" → "Marble Grade 3",
+  "Picanha" → "Rump Cap Picanha", "lchx" → "Whole Chicken", "liempo" → "Pork Belly"
+- "price": number (PHP per unit). Ranges like "120-130" → use lower value 120
+- "unit": normalized unit — kg, g, pc, box, case, liter, dozen, bag, tray
 - Skip items with no price
-- Clean product names
 
 Supplier: ${supplierName}
 
@@ -93,7 +96,7 @@ Content:
 ${text.slice(0, 8000)}
 
 Return JSON array only, no markdown, no explanation:
-[{"name":"Product","price":100,"unit":"kg"},...]`
+[{"name":"D-rump mb 2+","canonical":"Wagyu D-Rump Marble Grade 2","price":100,"unit":"kg"},...]`
 
       const aiRes = await httpsPost(
         'api.groq.com',
@@ -135,11 +138,16 @@ Return JSON array only, no markdown, no explanation:
     function normalize(str) {
       return (str || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()
     }
-    function matchProduct(name) {
-      const needle = normalize(name)
+    function matchProduct(canonical) {
+      const needle = normalize(canonical)
       return products.find(p => {
         const hay = normalize(p.canonical_name)
-        return hay === needle || needle.includes(hay) || hay.includes(needle)
+        if (hay === needle) return true
+        // Token overlap: ≥60% shared tokens → same product
+        const needleTokens = needle.split(' ')
+        const hayTokens = hay.split(' ')
+        const shared = needleTokens.filter(t => t.length > 2 && hayTokens.includes(t)).length
+        return shared >= Math.ceil(needleTokens.length * 0.6)
       }) || null
     }
 
@@ -149,12 +157,14 @@ Return JSON array only, no markdown, no explanation:
     for (const item of extracted) {
       if (!item.name || !item.price || item.price <= 0) continue
 
-      let product = matchProduct(item.name)
+      // Use AI-normalized canonical name for matching; fall back to raw name
+      const canonicalName = (item.canonical || item.name).trim()
+      let product = matchProduct(canonicalName)
 
       // Auto-create product if not in catalog
       if (!product) {
         const { data: newProduct } = await supabaseAdmin.from('products').insert({
-          canonical_name: item.name.trim(),
+          canonical_name: canonicalName,
           unit: item.unit || 'kg',
           category: 'uncategorized',
           active: true
