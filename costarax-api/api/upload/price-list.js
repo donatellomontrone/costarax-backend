@@ -93,7 +93,7 @@ Rules:
 Supplier: ${supplierName}
 
 Content:
-${text.slice(0, 8000)}
+${text.slice(0, 4000)}
 
 Return JSON array only, no markdown, no explanation:
 [{"name":"D-rump mb 2+","canonical":"Wagyu D-Rump Marble Grade 2","price":100,"unit":"kg"},...]`
@@ -103,9 +103,12 @@ Return JSON array only, no markdown, no explanation:
         '/openai/v1/chat/completions',
         { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
         {
-          model: 'llama-3.3-70b-versatile',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0.1,
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            { role: 'system', content: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.' },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.0,
           max_tokens: 4000
         }
       )
