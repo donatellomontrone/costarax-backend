@@ -100,10 +100,10 @@ Return JSON array only, no markdown, no explanation:
         '/openai/v1/chat/completions',
         { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
         {
-          model: 'llama-3.1-8b-instant',
+          model: 'llama-3.3-70b-versatile',
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.1,
-          max_tokens: 2000
+          max_tokens: 4000
         }
       )
 
@@ -111,9 +111,10 @@ Return JSON array only, no markdown, no explanation:
 
       const content = aiRes.body.choices?.[0]?.message?.content?.trim()
       if (!content) throw new Error('Empty response from Groq')
-      const jsonMatch = content.match(/\[[\s\S]*\]/)
-      if (!jsonMatch) throw new Error('No JSON array returned by AI')
-      extracted = JSON.parse(jsonMatch[0])
+      // Handle both raw array and markdown code blocks (```json [...] ```)
+      const jsonMatch = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/) || content.match(/(\[[\s\S]*\])/)
+      if (!jsonMatch) throw new Error('No JSON array returned by AI. Got: ' + content.slice(0, 200))
+      extracted = JSON.parse(jsonMatch[1] || jsonMatch[0])
     } catch (e) {
       if (uploadId) {
         await supabaseAdmin.from('price_list_uploads').update({
