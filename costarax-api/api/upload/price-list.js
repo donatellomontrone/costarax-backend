@@ -96,7 +96,7 @@ JSON:`
             { role: 'user', content: prompt }
           ],
           temperature: 0.0,
-          max_tokens: 4000
+          max_tokens: 1500
         }
       )
 
