@@ -105,10 +105,41 @@ JSON:`
 
       const content = aiRes.body.choices?.[0]?.message?.content?.trim()
       if (!content) throw new Error('Empty response from Groq')
-      // Handle both raw array and markdown code blocks (```json [...] ```)
+
+      // Extract JSON array (handle markdown code blocks too)
       const jsonMatch = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/) || content.match(/(\[[\s\S]*\])/)
       if (!jsonMatch) throw new Error('No JSON array returned by AI. Got: ' + content.slice(0, 200))
-      extracted = JSON.parse(jsonMatch[1] || jsonMatch[0])
+      let rawJson = (jsonMatch[1] || jsonMatch[0]).trim()
+
+      // Attempt 1: parse as-is
+      try {
+        extracted = JSON.parse(rawJson)
+      } catch (_) {
+        // Attempt 2: repair common LLM JSON issues
+        let repaired = rawJson
+          .replace(/,\s*([}\]])/g, '$1')          // trailing commas
+          .replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":') // unquoted keys
+          .replace(/:\s*'([^']*)'/g, ': "$1"')     // single-quoted values
+          .replace(/[\x00-\x1F\x7F]/g, ' ')         // control chars
+        // If truncated (no closing bracket), close it
+        if (!repaired.trimEnd().endsWith(']')) {
+          const lastGood = repaired.lastIndexOf('},')
+          repaired = (lastGood > 0 ? repaired.slice(0, lastGood + 1) : repaired) + ']'
+        }
+        try {
+          extracted = JSON.parse(repaired)
+        } catch (e2) {
+          // Attempt 3: extract individual objects via regex
+          const objs = []
+          const objRx = /\{[^{}]*"name"[^{}]*"price"[^{}]*\}/g
+          let m
+          while ((m = objRx.exec(rawJson)) !== null) {
+            try { objs.push(JSON.parse(m[0])) } catch (_) {}
+          }
+          if (objs.length === 0) throw new Error('Malformed JSON from AI: ' + rawJson.slice(0, 200))
+          extracted = objs
+        }
+      }
     } catch (e) {
       if (uploadId) {
         await supabaseAdmin.from('price_list_uploads').update({
