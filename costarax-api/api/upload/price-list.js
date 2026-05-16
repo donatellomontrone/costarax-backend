@@ -151,44 +151,41 @@ Return JSON array only, no markdown, no explanation:
       }) || null
     }
 
-    let matched = 0
-    let created = 0
-    const failed = []
-    for (const item of extracted) {
-      if (!item.name || !item.price || item.price <= 0) continue
+    // Separate items into matched vs needs-creation
+    const validItems = extracted.filter(i => i.name && i.price && i.price > 0)
+    const toCreate = []
+    const priceRows = []
 
-      // Use AI-normalized canonical name for matching; fall back to raw name
+    for (const item of validItems) {
       const canonicalName = (item.canonical || item.name).trim()
-      let product = matchProduct(canonicalName)
-
-      // Auto-create product if not in catalog
-      if (!product) {
-        const { data: newProduct } = await supabaseAdmin.from('products').insert({
-          canonical_name: canonicalName,
-          unit: item.unit || 'kg',
-          category: 'uncategorized',
-          active: true
-        }).select('id, canonical_name').single()
-
-        if (newProduct) {
-          products.push(newProduct) // add to local cache for dedup
-          product = newProduct
-          created++
-        } else {
-          failed.push(item.name)
-          continue
-        }
+      const product = matchProduct(canonicalName)
+      if (product) {
+        priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), unit: item.unit || null, active: true })
+      } else {
+        toCreate.push({ canonical_name: canonicalName, unit: item.unit || 'kg', category: 'uncategorized', active: true, _price: parseFloat(item.price), _unit: item.unit || null })
       }
-
-      await supabaseAdmin.from('supplier_prices').upsert({
-        supplier_id: supplierId,
-        product_id: product.id,
-        price_php: parseFloat(item.price),
-        unit: item.unit || null,
-        active: true
-      }, { onConflict: 'supplier_id,product_id' })
-      matched++
     }
+
+    // Bulk-insert new products in one query
+    let created = 0
+    if (toCreate.length) {
+      const insertPayload = toCreate.map(({ _price, _unit, ...p }) => p)
+      const { data: newProducts } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
+      if (newProducts) {
+        created = newProducts.length
+        newProducts.forEach((np, i) => {
+          priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, unit: toCreate[i]._unit, active: true })
+        })
+      }
+    }
+
+    // Bulk-upsert all prices in one query
+    if (priceRows.length) {
+      await supabaseAdmin.from('supplier_prices').upsert(priceRows, { onConflict: 'supplier_id,product_id' })
+    }
+
+    const matched = priceRows.length
+    const failed = []
 
     if (uploadId) {
       await supabaseAdmin.from('price_list_uploads').update({
