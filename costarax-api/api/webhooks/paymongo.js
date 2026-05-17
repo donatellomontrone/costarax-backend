@@ -1,6 +1,6 @@
-const { supabaseAdmin } = require('../../../lib/supabase-admin')
+const { supabaseAdmin } = require('../../lib/supabase-admin')
 const crypto = require('crypto')
-const { sendEmail } = require('../../../lib/email')
+const { sendEmail } = require('../../lib/email')
 
 async function getRawBody(req) {
   return new Promise((resolve, reject) => {
