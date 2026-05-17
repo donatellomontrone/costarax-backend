@@ -26,7 +26,30 @@ module.exports = async (req, res) => {
     if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' })
     updates.updated_at = new Date().toISOString()
 
-    const { error } = await supabaseAdmin.from('suppliers').update(updates).eq('id', id)
+    let { error } = await supabaseAdmin.from('suppliers').update(updates).eq('id', id)
+    // Graceful fallback: if trial_ends_at column doesn't exist yet (migration
+    // not applied on this database), retry the update without that field and
+    // surface a clearer error so the admin knows what to do.
+    if (error && /column .*trial_ends_at.* does not exist/i.test(error.message)) {
+      const { trial_ends_at, ...withoutTrial } = updates
+      if (Object.keys(withoutTrial).length > 1) { // > 1 because updated_at is always there
+        const retry = await supabaseAdmin.from('suppliers').update(withoutTrial).eq('id', id)
+        error = retry.error
+      }
+      if (!error) {
+        return res.status(200).json({
+          message: 'Supplier updated (trial date NOT saved — run migrations/trial_ends_at.sql in Supabase first)',
+          warning: 'trial_ends_at column missing; other fields saved successfully'
+        })
+      }
+    }
+    // Same defensive check for logo_url (in case photos.sql hasn't been applied)
+    if (error && /column .*logo_url.* does not exist/i.test(error.message)) {
+      return res.status(500).json({
+        error: 'Database missing logo_url column — run migrations/photos.sql in the Supabase SQL editor',
+        detail: error.message
+      })
+    }
     if (error) return res.status(500).json({ error: error.message })
 
     await supabaseAdmin.from('admin_actions').insert({
