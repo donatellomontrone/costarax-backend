@@ -26,11 +26,11 @@ module.exports = async (req, res) => {
           .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
         if (!org) return res.status(200).json([])
         ;({ data, error } = await supabaseAdmin.from('quote_requests')
-          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at')
+          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at,rfq_group_id')
           .eq('buyer_business_id', org.business_id).order('created_at', { ascending: false }))
       } else {
         ;({ data, error } = await supabaseAdmin.from('quote_requests')
-          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at')
+          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at,rfq_group_id')
           .eq('buyer_business_id', biz.id).order('created_at', { ascending: false }))
       }
 
