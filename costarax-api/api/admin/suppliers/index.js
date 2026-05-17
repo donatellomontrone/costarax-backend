@@ -9,14 +9,64 @@ module.exports = async (req, res) => {
   const auth = await requireAdmin(req, res)
   if (!auth) return
 
-  // GET — list all suppliers with full details
+  // GET — list ALL suppliers (active + paused) with full details and subscription state.
+  // Auto-pauses any supplier whose subscription's current_period_end is in the past.
   if (req.method === 'GET') {
-    const { data, error } = await supabaseAdmin
+    const { data: sups, error } = await supabaseAdmin
       .from('suppliers')
-      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan')
+      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at')
       .order('name')
     if (error) return res.status(500).json({ error: error.message })
-    return res.status(200).json(data)
+
+    const ids = (sups || []).map(s => s.id)
+    let subs = []
+    if (ids.length > 0) {
+      const r = await supabaseAdmin
+        .from('subscriptions')
+        .select('supplier_id, status, current_period_end, last_payment_at, last_payment_status, cancel_at_period_end, created_at')
+        .in('supplier_id', ids)
+      subs = r.data || []
+    }
+    const subBy = {}
+    subs.forEach(s => { subBy[s.supplier_id] = s })
+
+    const now = new Date()
+    const toAutoPause = []
+    const enriched = (sups || []).map(s => {
+      const sub = subBy[s.id] || null
+      const periodEnd = sub?.current_period_end ? new Date(sub.current_period_end) : null
+      const isExpired = !!(periodEnd && periodEnd < now)
+      if (isExpired && s.active) toAutoPause.push(s.id)
+      return {
+        ...s,
+        subscription_status: sub?.status || null,
+        last_payment_at: sub?.last_payment_at || null,
+        last_payment_status: sub?.last_payment_status || null,
+        current_period_end: sub?.current_period_end || null,
+        cancel_at_period_end: sub?.cancel_at_period_end || false,
+        membership_started_at: sub?.created_at || s.created_at || null,
+        expired: isExpired
+      }
+    })
+
+    // Auto-pause expired suppliers and reflect the change in the response
+    if (toAutoPause.length > 0) {
+      await supabaseAdmin.from('suppliers')
+        .update({ active: false })
+        .in('id', toAutoPause)
+        .catch(() => {})
+      await supabaseAdmin.from('admin_actions').insert(
+        toAutoPause.map(id => ({
+          admin_id: auth.user.id,
+          action_type: 'auto_pause_expired',
+          target_id: id,
+          notes: 'Subscription period ended — automatic pause'
+        }))
+      ).catch(() => {})
+      enriched.forEach(s => { if (toAutoPause.includes(s.id)) s.active = false })
+    }
+
+    return res.status(200).json(enriched)
   }
 
   // POST — create new supplier
