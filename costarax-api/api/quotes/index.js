@@ -17,6 +17,21 @@ module.exports = async (req, res) => {
   if (req.method === 'GET') {
     let data, error
 
+    // Try a rich SELECT first, fall back to a leaner one if newer columns
+    // (rfq_group_id, total_amount_php, confirmed_at, fulfilled_at, order_notes)
+    // don't exist yet on this database.
+    const RICH_COLS = 'id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at,rfq_group_id,total_amount_php,confirmed_at,fulfilled_at,order_notes'
+    const LEAN_COLS = 'id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at'
+    const fetchBuyerQuotes = async (bid) => {
+      let r = await supabaseAdmin.from('quote_requests').select(RICH_COLS)
+        .eq('buyer_business_id', bid).order('created_at', { ascending: false })
+      if (r.error && /column .*does not exist|Could not find/i.test(r.error.message || '')) {
+        r = await supabaseAdmin.from('quote_requests').select(LEAN_COLS)
+          .eq('buyer_business_id', bid).order('created_at', { ascending: false })
+      }
+      return r
+    }
+
     if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
       const { data: biz } = await supabaseAdmin
         .from('businesses').select('id').eq('contact_email', auth.user.email).single()
@@ -25,13 +40,9 @@ module.exports = async (req, res) => {
         const { data: org } = await supabaseAdmin
           .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
         if (!org) return res.status(200).json([])
-        ;({ data, error } = await supabaseAdmin.from('quote_requests')
-          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at,rfq_group_id')
-          .eq('buyer_business_id', org.business_id).order('created_at', { ascending: false }))
+        ;({ data, error } = await fetchBuyerQuotes(org.business_id))
       } else {
-        ;({ data, error } = await supabaseAdmin.from('quote_requests')
-          .select('id,supplier_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at,rfq_group_id')
-          .eq('buyer_business_id', biz.id).order('created_at', { ascending: false }))
+        ;({ data, error } = await fetchBuyerQuotes(biz.id))
       }
 
     } else if (auth.profile.role === 'supplier') {

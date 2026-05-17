@@ -72,7 +72,7 @@ module.exports = async (req, res) => {
   if (action === 'confirm') {
     if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
 
-    const { order_notes } = req.body || {}
+    const { order_notes, total_amount_php } = req.body || {}
 
     const { data: quote, error: qErr } = await supabaseAdmin
       .from('quote_requests').select('*,businesses(name,contact_email),suppliers(name)').eq('id', id).single()
@@ -89,10 +89,30 @@ module.exports = async (req, res) => {
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
     }
 
-    const { error } = await supabaseAdmin.from('quote_requests').update({
-      status: 'confirmed', confirmed_at: new Date().toISOString(), order_notes: order_notes?.trim() || null
-    }).eq('id', id)
-    if (error) return res.status(500).json({ error: error.message })
+    const totalAmount = total_amount_php != null && !isNaN(Number(total_amount_php))
+      ? Number(total_amount_php) : null
+
+    // Defensive payload: drop columns if Postgres reports them missing so the
+    // confirm still succeeds even before migrations/orders.sql is applied.
+    let payload = {
+      status: 'confirmed',
+      confirmed_at: new Date().toISOString(),
+      order_notes: order_notes?.trim() || null,
+      total_amount_php: totalAmount
+    }
+    const droppedCols = []
+    let updateErr = null
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const r = await supabaseAdmin.from('quote_requests').update(payload).eq('id', id)
+      if (!r.error) { updateErr = null; break }
+      updateErr = r.error
+      const msg = String(r.error.message || '')
+      const m = msg.match(/column "?([a-z_]+)"? .* does not exist/i)
+        || msg.match(/Could not find the '([a-z_]+)' column/i)
+      if (m && payload[m[1]] !== undefined) { droppedCols.push(m[1]); delete payload[m[1]]; continue }
+      break
+    }
+    if (updateErr) return res.status(500).json({ error: updateErr.message, droppedColumns: droppedCols })
 
     try {
       const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).single()
