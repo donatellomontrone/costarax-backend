@@ -14,7 +14,7 @@ module.exports = async (req, res) => {
   if (req.method === 'GET') {
     const { data: sups, error } = await supabaseAdmin
       .from('suppliers')
-      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at, trial_ends_at')
+      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at, trial_ends_at, logo_url')
       .order('name')
     if (error) return res.status(500).json({ error: error.message })
 
