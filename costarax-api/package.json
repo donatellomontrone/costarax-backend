@@ -2,8 +2,11 @@
   "name": "costarax-api",
   "version": "1.0.0",
   "private": true,
-  "engines": { "node": "24.x" },
+  "engines": {
+    "node": "24.x"
+  },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.96.0",
     "@supabase/supabase-js": "^2.43.4",
     "formidable": "^3.5.1",
     "nodemailer": "^6.9.13"
