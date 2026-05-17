@@ -57,7 +57,7 @@ module.exports = async (req, res) => {
     // Auto-pause: paid subscriptions whose period ended
     if (toAutoPauseSub.length > 0) {
       await supabaseAdmin.from('suppliers').update({ active: false })
-        .in('id', toAutoPauseSub).catch(() => {})
+        .in('id', toAutoPauseSub)
       await supabaseAdmin.from('admin_actions').insert(
         toAutoPauseSub.map(id => ({
           admin_id: auth.user.id,
@@ -65,14 +65,14 @@ module.exports = async (req, res) => {
           target_id: id,
           notes: 'Subscription period ended — automatic pause'
         }))
-      ).catch(() => {})
+      )
       enriched.forEach(s => { if (toAutoPauseSub.includes(s.id)) s.active = false })
     }
 
     // Auto-pause: trials whose trial_ends_at is past
     if (toAutoPauseTrial.length > 0) {
       await supabaseAdmin.from('suppliers').update({ active: false })
-        .in('id', toAutoPauseTrial).catch(() => {})
+        .in('id', toAutoPauseTrial)
       await supabaseAdmin.from('admin_actions').insert(
         toAutoPauseTrial.map(id => ({
           admin_id: auth.user.id,
@@ -80,7 +80,7 @@ module.exports = async (req, res) => {
           target_id: id,
           notes: 'Trial period ended — automatic pause'
         }))
-      ).catch(() => {})
+      )
       enriched.forEach(s => { if (toAutoPauseTrial.includes(s.id)) s.active = false })
     }
 
@@ -116,7 +116,7 @@ module.exports = async (req, res) => {
       action_type: 'create_supplier',
       target_id: data.id,
       notes: `Created supplier: ${name}`
-    }).catch(() => {})
+    })
 
     return res.status(201).json({ id: data.id, message: `${name} created successfully` })
   }

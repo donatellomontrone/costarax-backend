@@ -26,7 +26,7 @@ module.exports = async (req, res) => {
     const { error } = await supabaseAdmin.from('businesses').update({ status: 'approved', approved_at: new Date().toISOString() }).eq('id', id)
     if (error) return res.status(500).json({ error: error.message })
 
-    await supabaseAdmin.from('admin_actions').insert({ admin_id: auth.user.id, action_type: 'approve_business', target_id: id, notes: `Approved: ${biz.name}` }).catch(() => {})
+    await supabaseAdmin.from('admin_actions').insert({ admin_id: auth.user.id, action_type: 'approve_business', target_id: id, notes: `Approved: ${biz.name}` })
     if (biz.contact_email) {
       const tpl = accessApprovedEmail({ companyName: biz.name, contactEmail: biz.contact_email })
       await sendEmail({ to: biz.contact_email, ...tpl })
@@ -42,7 +42,7 @@ module.exports = async (req, res) => {
     const { error } = await supabaseAdmin.from('businesses').update({ status: 'rejected' }).eq('id', id)
     if (error) return res.status(500).json({ error: error.message })
 
-    await supabaseAdmin.from('admin_actions').insert({ admin_id: auth.user.id, action_type: 'reject_business', target_id: id, notes: `Rejected: ${biz.name}` }).catch(() => {})
+    await supabaseAdmin.from('admin_actions').insert({ admin_id: auth.user.id, action_type: 'reject_business', target_id: id, notes: `Rejected: ${biz.name}` })
     return res.status(200).json({ message: `${biz.name} rejected` })
   }
 

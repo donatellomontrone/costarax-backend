@@ -32,7 +32,7 @@ module.exports = async (req, res) => {
     await supabaseAdmin.from('admin_actions').insert({
       admin_id: auth.user.id, action_type: 'reject_access_request',
       target_id: id, notes: `Rejected: ${request.company_name}`
-    }).catch(() => {})
+    })
 
     return res.status(200).json({ message: `${request.company_name} rejected` })
   }
@@ -75,10 +75,10 @@ module.exports = async (req, res) => {
       if (userId) {
         await supabaseAdmin.from('profiles').upsert({
           id: userId, email: request.contact_email, role: 'supplier', status: 'approved'
-        }).catch(() => {})
+        })
         await supabaseAdmin.from('organization_members').insert({
           user_id: userId, supplier_id: supplier.id
-        }).catch(() => {})
+        })
       }
 
       await supabaseAdmin.from('access_requests').update({
@@ -89,7 +89,7 @@ module.exports = async (req, res) => {
         admin_id: auth.user.id, action_type: 'approve_supplier_request',
         target_id: supplier.id,
         notes: `Approved supplier: ${request.company_name} (${request.contact_email})`
-      }).catch(() => {})
+      })
 
       if (request.contact_email) {
         const tpl = accessApprovedEmail({ companyName: request.company_name, contactEmail: request.contact_email })
@@ -126,10 +126,10 @@ module.exports = async (req, res) => {
       if (userId) {
         await supabaseAdmin.from('profiles').upsert({
           id: userId, email: request.contact_email, role: 'buyer', status: 'approved'
-        }).catch(() => {})
+        })
         await supabaseAdmin.from('organization_members').insert({
           user_id: userId, business_id: biz.id
-        }).catch(() => {})
+        })
       }
 
       await supabaseAdmin.from('access_requests').update({
@@ -139,7 +139,7 @@ module.exports = async (req, res) => {
       await supabaseAdmin.from('admin_actions').insert({
         admin_id: auth.user.id, action_type: 'approve_buyer_request',
         target_id: biz.id, notes: `Approved buyer: ${request.company_name}`
-      }).catch(() => {})
+      })
 
       if (request.contact_email) {
         const tpl = accessApprovedEmail({ companyName: request.company_name, contactEmail: request.contact_email })

@@ -56,7 +56,7 @@ module.exports = async (req, res) => {
   await supabaseAdmin.from('payment_events').insert({
     provider: 'paymongo', provider_event_id: eventId, event_type: eventType,
     livemode: event.data?.attributes?.livemode || false, payload: event
-  }).catch(() => {})
+  })
 
   const sessionId = event.data?.attributes?.data?.id
   const now = new Date().toISOString()

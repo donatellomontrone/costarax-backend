@@ -99,7 +99,7 @@ module.exports = async (req, res) => {
         action_type: 'edit_supplier',
         target_id: id,
         notes: `Updated: ${Object.keys(payload).filter(k => k !== 'updated_at').join(', ')}`
-      }).catch(() => {})
+      })
 
       const allDropped = [...missingCols, ...droppedCols]
       if (allDropped.length > 0) {
@@ -123,7 +123,7 @@ module.exports = async (req, res) => {
       await supabaseAdmin.from('admin_actions').insert({
         admin_id: auth.user.id, action_type: 'remove_supplier', target_id: id,
         notes: `Removed supplier: ${s?.name}`
-      }).catch(() => {})
+      })
       return res.status(200).json({ message: 'Supplier removed' })
     }
 
