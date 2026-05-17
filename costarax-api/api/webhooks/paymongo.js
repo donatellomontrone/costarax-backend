@@ -24,16 +24,17 @@ function verifySignature(rawBody, signature, secret) {
 exports.config = { api: { bodyParser: false } }
 
 module.exports = async (req, res) => {
+  try {
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).end()
-
-  const rawBody = await getRawBody(req)
-  const signature = req.headers['paymongo-signature']
 
   if (!process.env.PAYMONGO_WEBHOOK_SECRET) {
     console.error('PAYMONGO_WEBHOOK_SECRET not configured — rejecting webhook')
     return res.status(500).json({ error: 'Webhook secret not configured' })
   }
+
+  const rawBody = await getRawBody(req)
+  const signature = req.headers['paymongo-signature']
 
   if (!signature || !verifySignature(rawBody.toString(), signature, process.env.PAYMONGO_WEBHOOK_SECRET)) {
     return res.status(400).json({ error: 'Invalid signature' })
@@ -129,4 +130,8 @@ module.exports = async (req, res) => {
     .update({ processed_at: now }).eq('provider_event_id', eventId)
 
   return res.status(200).json({ message: 'Webhook processed' })
+  } catch (fatalErr) {
+    console.error('[webhooks/paymongo] Unhandled error:', fatalErr.message)
+    return res.status(500).json({ error: 'Internal server error', detail: fatalErr.message })
+  }
 }
