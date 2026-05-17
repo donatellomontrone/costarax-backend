@@ -18,7 +18,7 @@ module.exports = async (req, res) => {
                      'active', 'status', 'plan', 'vat_registered', 'payment_terms', 'credit_terms',
                      'contact_name', 'contact_phone', 'contact_email', 'delivery_days', 'lead_time_days',
                      'cold_chain', 'years_in_business', 'price_validity_days', 'sample_available',
-                     'certifications', 'bir_registration']
+                     'certifications', 'bir_registration', 'trial_ends_at']
     const updates = {}
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key]

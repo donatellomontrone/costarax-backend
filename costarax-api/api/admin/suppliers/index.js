@@ -14,7 +14,7 @@ module.exports = async (req, res) => {
   if (req.method === 'GET') {
     const { data: sups, error } = await supabaseAdmin
       .from('suppliers')
-      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at')
+      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at, trial_ends_at')
       .order('name')
     if (error) return res.status(500).json({ error: error.message })
 
@@ -31,12 +31,16 @@ module.exports = async (req, res) => {
     subs.forEach(s => { subBy[s.supplier_id] = s })
 
     const now = new Date()
-    const toAutoPause = []
+    const toAutoPauseSub   = []    // expired paid subscriptions
+    const toAutoPauseTrial = []    // expired trials (no sub, trial_ends_at past)
     const enriched = (sups || []).map(s => {
       const sub = subBy[s.id] || null
       const periodEnd = sub?.current_period_end ? new Date(sub.current_period_end) : null
-      const isExpired = !!(periodEnd && periodEnd < now)
-      if (isExpired && s.active) toAutoPause.push(s.id)
+      const trialEnd  = s.trial_ends_at ? new Date(s.trial_ends_at) : null
+      const subExpired   = !!(periodEnd && periodEnd < now)
+      const trialExpired = !sub && !!(trialEnd && trialEnd < now)
+      if (subExpired && s.active)   toAutoPauseSub.push(s.id)
+      if (trialExpired && s.active) toAutoPauseTrial.push(s.id)
       return {
         ...s,
         subscription_status: sub?.status || null,
@@ -45,25 +49,39 @@ module.exports = async (req, res) => {
         current_period_end: sub?.current_period_end || null,
         cancel_at_period_end: sub?.cancel_at_period_end || false,
         membership_started_at: sub?.created_at || s.created_at || null,
-        expired: isExpired
+        expired: subExpired,
+        trial_expired: trialExpired
       }
     })
 
-    // Auto-pause expired suppliers and reflect the change in the response
-    if (toAutoPause.length > 0) {
-      await supabaseAdmin.from('suppliers')
-        .update({ active: false })
-        .in('id', toAutoPause)
-        .catch(() => {})
+    // Auto-pause: paid subscriptions whose period ended
+    if (toAutoPauseSub.length > 0) {
+      await supabaseAdmin.from('suppliers').update({ active: false })
+        .in('id', toAutoPauseSub).catch(() => {})
       await supabaseAdmin.from('admin_actions').insert(
-        toAutoPause.map(id => ({
+        toAutoPauseSub.map(id => ({
           admin_id: auth.user.id,
           action_type: 'auto_pause_expired',
           target_id: id,
           notes: 'Subscription period ended — automatic pause'
         }))
       ).catch(() => {})
-      enriched.forEach(s => { if (toAutoPause.includes(s.id)) s.active = false })
+      enriched.forEach(s => { if (toAutoPauseSub.includes(s.id)) s.active = false })
+    }
+
+    // Auto-pause: trials whose trial_ends_at is past
+    if (toAutoPauseTrial.length > 0) {
+      await supabaseAdmin.from('suppliers').update({ active: false })
+        .in('id', toAutoPauseTrial).catch(() => {})
+      await supabaseAdmin.from('admin_actions').insert(
+        toAutoPauseTrial.map(id => ({
+          admin_id: auth.user.id,
+          action_type: 'auto_pause_trial_expired',
+          target_id: id,
+          notes: 'Trial period ended — automatic pause'
+        }))
+      ).catch(() => {})
+      enriched.forEach(s => { if (toAutoPauseTrial.includes(s.id)) s.active = false })
     }
 
     return res.status(200).json(enriched)
