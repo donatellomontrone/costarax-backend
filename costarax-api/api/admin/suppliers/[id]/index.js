@@ -31,34 +31,66 @@ module.exports = async (req, res) => {
       // Helper: run update, return { error } from Supabase
       const runUpdate = (payload) => supabaseAdmin.from('suppliers').update(payload).eq('id', id)
 
-      // Strip fields whose column doesn't exist yet (so the update doesn't 500).
-      // We retry until either the update succeeds or there are no fields left.
-      const optionalCols = ['trial_ends_at', 'logo_url']
+      // Defensive retry: if Postgres complains a column doesn't exist OR has
+      // the wrong type for our value, strip that field and try again. Bounded
+      // by 8 iterations so a permanent error can't infinite-loop.
       const missingCols = []
+      const droppedCols = []
       let payload = { ...updates }
-      // Best-effort: include updated_at; if it doesn't exist we'll strip and retry.
       payload.updated_at = new Date().toISOString()
 
       let lastError = null
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const { error } = await runUpdate(payload)
-        if (!error) { lastError = null; break }
-        lastError = error
-        const msg = error.message || ''
-        // Identify a missing column from the Postgres error and strip it
-        const m = msg.match(/column "?([a-z_]+)"? .* does not exist/i)
-        if (m && payload[m[1]] !== undefined) {
-          missingCols.push(m[1])
-          delete payload[m[1]]
-          continue
+      for (let attempt = 0; attempt < 8; attempt++) {
+        try {
+          const { error } = await runUpdate(payload)
+          if (!error) { lastError = null; break }
+          lastError = error
+          const msg = String(error.message || '')
+          console.warn(`PATCH attempt ${attempt+1} error:`, msg, 'code:', error.code, 'details:', error.details, 'hint:', error.hint)
+
+          // 1) Missing column
+          let m = msg.match(/column "?([a-z_]+)"? .* does not exist/i)
+          if (m && payload[m[1]] !== undefined) {
+            missingCols.push(m[1]); delete payload[m[1]]; continue
+          }
+          // 2) Could not find column on the cache (PostgREST)
+          m = msg.match(/Could not find the '([a-z_]+)' column/i) ||
+              msg.match(/'([a-z_]+)' column of '[^']+' in the schema cache/i)
+          if (m && payload[m[1]] !== undefined) {
+            missingCols.push(m[1]); delete payload[m[1]]; continue
+          }
+          // 3) Invalid type / malformed array literal — strip the column
+          //    (Postgres "details" usually names the offending column)
+          if (error.details) {
+            const dm = String(error.details).match(/column "?([a-z_]+)"?/i)
+            if (dm && payload[dm[1]] !== undefined) {
+              droppedCols.push(dm[1]); delete payload[dm[1]]; continue
+            }
+          }
+          // 4) "invalid input syntax for type X" without an obvious column —
+          //    try removing array-typed fields one at a time as a last resort
+          if (/invalid input syntax|malformed array/i.test(msg)) {
+            for (const k of ['categories', 'certifications', 'delivery_days']) {
+              if (payload[k] !== undefined) { droppedCols.push(k); delete payload[k]; break }
+            }
+            continue
+          }
+          // Unknown error — bail
+          break
+        } catch (e) {
+          lastError = { message: e.message || String(e) }
+          break
         }
-        // Some other error — bail
-        break
       }
 
       if (lastError) {
-        console.error('PATCH supplier error:', lastError.message)
-        return res.status(500).json({ error: lastError.message })
+        console.error('PATCH supplier failed:', lastError.message, 'after attempts. Payload keys left:', Object.keys(payload))
+        return res.status(500).json({
+          error: lastError.message,
+          detail: lastError.details || lastError.hint || null,
+          missingColumns: missingCols,
+          droppedColumns: droppedCols
+        })
       }
 
       // Audit log (fire-and-forget)
@@ -69,11 +101,15 @@ module.exports = async (req, res) => {
         notes: `Updated: ${Object.keys(payload).filter(k => k !== 'updated_at').join(', ')}`
       }).catch(() => {})
 
-      if (missingCols.length > 0) {
+      const allDropped = [...missingCols, ...droppedCols]
+      if (allDropped.length > 0) {
         return res.status(200).json({
-          message: `Supplier updated. ${missingCols.length} field${missingCols.length !== 1 ? 's' : ''} NOT saved (${missingCols.join(', ')}) — run the missing SQL migrations to enable them.`,
-          warning: `Missing columns: ${missingCols.join(', ')}. Run migrations/trial_ends_at.sql and/or migrations/photos.sql in Supabase.`,
-          missingColumns: missingCols
+          message: `Supplier updated. ${allDropped.length} field${allDropped.length !== 1 ? 's' : ''} NOT saved (${allDropped.join(', ')}).`,
+          warning: missingCols.length
+            ? `Missing columns: ${missingCols.join(', ')}. Run migrations/trial_ends_at.sql or migrations/photos.sql in Supabase.`
+            : `Dropped fields due to value/type mismatch: ${droppedCols.join(', ')}.`,
+          missingColumns: missingCols,
+          droppedColumns: droppedCols
         })
       }
       return res.status(200).json({ message: 'Supplier updated' })
