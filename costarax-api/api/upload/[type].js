@@ -166,7 +166,7 @@ JSON:`
     const category_id = VALID_CATEGORIES.includes(item.category) ? item.category : 'dry'
     const product = matchProduct(canonicalName)
     const unit = (item.unit || 'kg').trim()
-    if (product) priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), unit, active: true })
+    if (product) priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), unit, active: true, updated_at: new Date().toISOString() })
     else toCreate.push({ canonical_name: canonicalName, category_id, default_unit: unit, active: true, _price: parseFloat(item.price), _unit: unit })
   }
 
@@ -177,7 +177,7 @@ JSON:`
     insertError = iErr?.message || null
     if (newProducts) {
       created = newProducts.length
-      newProducts.forEach((np, i) => priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, unit: toCreate[i]._unit, active: true }))
+      newProducts.forEach((np, i) => priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, unit: toCreate[i]._unit, active: true, updated_at: new Date().toISOString() }))
     }
   }
 
