@@ -116,11 +116,11 @@ async function sendViber(to, event, data, cfg) {
   const text = SMS_TEMPLATES[event]?.(data)
   if (!text) return
   try {
-    const res = await infobipPost('/viber/2/message', {
+    const res = await infobipPost('/viber/2/messages', {
       messages: [{
-        sender:  cfg.viber,
+        sender:       cfg.viber,
         destinations: [{ to: phone }],
-        viber: { text }
+        content:      { type: 'TEXT', text },
       }]
     }, cfg.apiKey, cfg.baseUrl)
     if (res.status >= 400) console.warn('[notify] Viber failed:', res.status, JSON.stringify(res.body))
