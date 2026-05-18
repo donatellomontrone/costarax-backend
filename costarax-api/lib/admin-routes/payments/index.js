@@ -1,4 +1,4 @@
-const { supabaseAdmin, requireAdmin } = require('../../../lib/supabase-admin')
+const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
 
 const CORS_H = {
   'Access-Control-Allow-Origin': '*',

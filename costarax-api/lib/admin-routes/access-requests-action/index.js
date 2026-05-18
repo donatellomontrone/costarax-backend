@@ -1,5 +1,5 @@
-const { supabaseAdmin, requireAdmin } = require('../../../../../lib/supabase-admin')
-const { sendEmail, accessApprovedEmail } = require('../../../../../lib/email')
+const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
+const { sendEmail, accessApprovedEmail } = require('../../email')
 
 const CORS_H = {
   'Access-Control-Allow-Origin': '*',
