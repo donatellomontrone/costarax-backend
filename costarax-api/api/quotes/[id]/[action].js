@@ -92,13 +92,25 @@ module.exports = async (req, res) => {
     const totalAmount = total_amount_php != null && !isNaN(Number(total_amount_php))
       ? Number(total_amount_php) : null
 
+    // Generate order number CX-YYYY-NNNN
+    let orderNumber = null
+    try {
+      const { count } = await supabaseAdmin
+        .from('quote_requests')
+        .select('*', { count: 'exact', head: true })
+        .in('status', ['confirmed', 'fulfilled'])
+      const n = String((count || 0) + 1).padStart(4, '0')
+      orderNumber = `CX-${new Date().getFullYear()}-${n}`
+    } catch (_) {}
+
     // Defensive payload: drop columns if Postgres reports them missing so the
     // confirm still succeeds even before migrations/orders.sql is applied.
     let payload = {
       status: 'confirmed',
       confirmed_at: new Date().toISOString(),
       order_notes: order_notes?.trim() || null,
-      total_amount_php: totalAmount
+      total_amount_php: totalAmount,
+      order_number: orderNumber
     }
     const droppedCols = []
     let updateErr = null
@@ -195,6 +207,33 @@ module.exports = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
     return res.status(201).json({ message: 'Review submitted' })
+  }
+
+  // ── RECURRING ─────────────────────────────────────────────────────────────
+  if (action === 'recurring') {
+    if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
+
+    const { freq } = req.body || {}
+    const validFreqs = ['weekly', 'biweekly', 'monthly', null]
+    if (!validFreqs.includes(freq)) return res.status(400).json({ error: 'Invalid freq — use weekly, biweekly, monthly, or null' })
+
+    if (auth.profile.role !== 'admin') {
+      const { data: quote } = await supabaseAdmin
+        .from('quote_requests').select('buyer_business_id').eq('id', id).single()
+      if (!quote) return res.status(404).json({ error: 'Quote not found' })
+      let buyerBusinessId = null
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      if (biz) { buyerBusinessId = biz.id } else {
+        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        buyerBusinessId = org?.business_id || null
+      }
+      if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
+    }
+
+    const { error } = await supabaseAdmin
+      .from('quote_requests').update({ recurring_freq: freq || null }).eq('id', id)
+    if (error) return res.status(500).json({ error: error.message })
+    return res.status(200).json({ message: 'Recurring frequency updated', freq: freq || null })
   }
 
   return res.status(404).json({ error: 'Unknown action' })
