@@ -53,40 +53,68 @@ async function infobipPost(path, body, apiKey, baseUrl) {
   })
 }
 
-// Message templates
-const TEMPLATES = {
-  quote_received: ({ buyerName, products }) =>
-    `[Costarax] New quote request from ${buyerName}.\nProducts: ${products || '—'}.\nReply at costarax.com`,
-
-  quote_replied: ({ supplierName }) =>
-    `[Costarax] ${supplierName} replied to your quote.\nConfirm your order at costarax.com`,
-
-  order_confirmed: ({ buyerName }) =>
-    `[Costarax] ${buyerName} confirmed an order with you.\nView details at costarax.com`,
-
-  order_fulfilled: ({ supplierName }) =>
-    `[Costarax] Your order from ${supplierName} has been fulfilled.\nRate your experience at costarax.com`,
+// WhatsApp template definitions — register these names on Infobip dashboard
+// Each event maps to a template name + ordered placeholders array
+const WA_TEMPLATES = {
+  quote_received: {
+    name: 'costarax_quote_received',
+    placeholders: ({ buyerName, products }) => [buyerName, products || '—'],
+  },
+  quote_replied: {
+    name: 'costarax_quote_replied',
+    placeholders: ({ supplierName }) => [supplierName],
+  },
+  order_confirmed: {
+    name: 'costarax_order_confirmed',
+    placeholders: ({ buyerName }) => [buyerName],
+  },
+  order_fulfilled: {
+    name: 'costarax_order_fulfilled',
+    placeholders: ({ supplierName }) => [supplierName],
+  },
 }
 
-async function sendWhatsApp(to, text, cfg) {
+// SMS fallback uses plain text
+const SMS_TEMPLATES = {
+  quote_received: ({ buyerName, products }) =>
+    `[Costarax] New quote from ${buyerName}. Products: ${products || '—'}. costarax.com`,
+  quote_replied: ({ supplierName }) =>
+    `[Costarax] ${supplierName} replied to your quote. costarax.com`,
+  order_confirmed: ({ buyerName }) =>
+    `[Costarax] ${buyerName} confirmed an order with you. costarax.com`,
+  order_fulfilled: ({ supplierName }) =>
+    `[Costarax] Order from ${supplierName} fulfilled. Rate at costarax.com`,
+}
+
+async function sendWhatsApp(to, event, data, cfg) {
   if (!cfg.whatsapp) { console.log('[notify] WhatsApp sender not configured — skipping'); return }
   const phone = e164PH(to)
   if (!phone) { console.log('[notify] Invalid phone for WhatsApp:', to); return }
+  const tpl = WA_TEMPLATES[event]
+  if (!tpl) return
   try {
-    const res = await infobipPost('/whatsapp/1/message/text', {
-      from: cfg.whatsapp,
-      to:   phone,
-      content: { text }
+    const res = await infobipPost('/whatsapp/1/message/template', {
+      messages: [{
+        from: cfg.whatsapp,
+        to:   phone,
+        content: {
+          templateName: tpl.name,
+          templateData: { body: { placeholders: tpl.placeholders(data) } },
+          language: 'en',
+        },
+      }]
     }, cfg.apiKey, cfg.baseUrl)
     if (res.status >= 400) console.warn('[notify] WhatsApp failed:', res.status, JSON.stringify(res.body))
     else console.log('[notify] WhatsApp sent to', phone)
   } catch (e) { console.error('[notify] WhatsApp error:', e.message) }
 }
 
-async function sendViber(to, text, cfg) {
+async function sendViber(to, event, data, cfg) {
   if (!cfg.viber) { console.log('[notify] Viber sender not configured — skipping'); return }
   const phone = e164PH(to)
   if (!phone) { console.log('[notify] Invalid phone for Viber:', to); return }
+  const text = SMS_TEMPLATES[event]?.(data)
+  if (!text) return
   try {
     const res = await infobipPost('/viber/2/message', {
       messages: [{
@@ -100,9 +128,11 @@ async function sendViber(to, text, cfg) {
   } catch (e) { console.error('[notify] Viber error:', e.message) }
 }
 
-async function sendSMS(to, text, cfg) {
+async function sendSMS(to, event, data, cfg) {
   const phone = e164PH(to)
   if (!phone) { console.log('[notify] Invalid phone for SMS:', to); return }
+  const text = SMS_TEMPLATES[event]?.(data)
+  if (!text) return
   try {
     const res = await infobipPost('/sms/2/text/advanced', {
       messages: [{
@@ -127,9 +157,8 @@ async function sendSMS(to, text, cfg) {
  * SMS used as fallback only if neither WA nor Viber is configured.
  */
 async function notify({ event, to, data = {} }) {
-  const tpl = TEMPLATES[event]
-  if (!tpl) { console.warn('[notify] Unknown event:', event); return }
-  if (!to)  { console.log('[notify] No phone for event:', event, '— skipping'); return }
+  if (!WA_TEMPLATES[event]) { console.warn('[notify] Unknown event:', event); return }
+  if (!to) { console.log('[notify] No phone for event:', event, '— skipping'); return }
 
   const cfg = getConfig()
   if (!cfg.apiKey || !cfg.baseUrl) {
@@ -137,14 +166,13 @@ async function notify({ event, to, data = {} }) {
     return
   }
 
-  const text = tpl(data)
   const hasApp = cfg.whatsapp || cfg.viber
 
   await Promise.allSettled([
-    sendWhatsApp(to, text, cfg),
-    sendViber(to, text, cfg),
+    sendWhatsApp(to, event, data, cfg),
+    sendViber(to, event, data, cfg),
     // SMS only as fallback when no app channel is configured
-    ...(!hasApp ? [sendSMS(to, text, cfg)] : []),
+    ...(!hasApp ? [sendSMS(to, event, data, cfg)] : []),
   ])
 }
 
