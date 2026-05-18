@@ -1,5 +1,6 @@
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { sendEmail, quoteReceivedEmail } = require('../../lib/email')
+const { notify } = require('../../lib/notify')
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -112,7 +113,7 @@ module.exports = async (req, res) => {
     if (error) return res.status(500).json({ error: error.message })
 
     try {
-      const { data: supplier } = await supabaseAdmin.from('suppliers').select('name').eq('id', supplier_id).single()
+      const { data: supplier } = await supabaseAdmin.from('suppliers').select('name,contact_phone').eq('id', supplier_id).single()
       const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', supplier_id).single()
       if (supplierMember?.user_id) {
         const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).single()
@@ -121,6 +122,7 @@ module.exports = async (req, res) => {
           await sendEmail({ to: sp.email, ...tpl })
         }
       }
+      notify({ event: 'quote_received', to: supplier?.contact_phone, data: { buyerName: buyerName || 'A buyer', products: products_summary || '' } })
     } catch(e) { console.error('Email error:', e.message) }
 
     return res.status(201).json({ id: quote.id, message: 'Quote request sent' })
