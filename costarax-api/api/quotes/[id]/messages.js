@@ -47,29 +47,35 @@ module.exports = async (req, res) => {
   if (!quote) return res.status(404).json({ error: 'Quote not found' })
   if (!allowed) return res.status(403).json({ error: 'Not authorized' })
 
-  // GET — load all messages
+  // GET — load all messages for this quote
   if (req.method === 'GET') {
     const { data, error } = await supabaseAdmin
       .from('quote_messages')
-      .select('id,sender_type,sender_name,text,created_at')
-      .eq('quote_id', id)
+      .select('id,sender_role,sender_profile_id,body,created_at,profiles(full_name,email)')
+      .eq('quote_request_id', id)
       .order('created_at', { ascending: true })
     if (error) return res.status(500).json({ error: error.message })
     return res.status(200).json(data || [])
   }
 
-  // POST — save a new message
+  // POST — save a new message (sender determined from auth context)
   if (req.method === 'POST') {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {})
-    const { sender_type, sender_name, text } = body
+    const text = body.text?.trim() || body.body?.trim()
+    if (!text) return res.status(400).json({ error: 'Text is required' })
 
-    if (!['buyer', 'supplier'].includes(sender_type)) return res.status(400).json({ error: 'Invalid sender_type' })
-    if (!text?.trim()) return res.status(400).json({ error: 'Text is required' })
+    const senderRole = auth.profile.role === 'admin' ? 'admin'
+      : (auth.profile.role === 'supplier' ? 'supplier' : 'buyer')
 
     const { data, error } = await supabaseAdmin
       .from('quote_messages')
-      .insert({ quote_id: id, sender_type, sender_name: sender_name || null, text: text.trim() })
-      .select('id,sender_type,sender_name,text,created_at')
+      .insert({
+        quote_request_id: id,
+        sender_profile_id: auth.user.id,
+        sender_role: senderRole,
+        body: text
+      })
+      .select('id,sender_role,sender_profile_id,body,created_at,profiles(full_name,email)')
       .single()
     if (error) return res.status(500).json({ error: error.message })
     return res.status(201).json(data)
