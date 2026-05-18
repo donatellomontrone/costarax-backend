@@ -1,16 +1,29 @@
 const nodemailer = require('nodemailer')
 
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: parseInt(process.env.EMAIL_PORT || '587'),
-  secure: false,
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-})
+const FROM = process.env.EMAIL_FROM || 'Costarax <onboarding@resend.dev>'
 
 async function sendEmail({ to, subject, html }) {
-  if (!process.env.EMAIL_USER) { console.log('[Email skipped — no SMTP configured]', { to, subject }); return { ok: true } }
+  // Prefer Resend SDK when RESEND_API_KEY is set
+  if (process.env.RESEND_API_KEY) {
+    try {
+      const { Resend } = require('resend')
+      const resend = new Resend(process.env.RESEND_API_KEY)
+      const { error } = await resend.emails.send({ from: FROM, to, subject, html })
+      if (error) { console.error('[Resend error]', error); return { ok: false, error: error.message } }
+      return { ok: true }
+    } catch (err) { console.error('[Resend error]', err.message); return { ok: false, error: err.message } }
+  }
+
+  // Fallback: nodemailer SMTP
+  if (!process.env.EMAIL_USER) { console.log('[Email skipped — no provider configured]', { to, subject }); return { ok: true } }
   try {
-    await transporter.sendMail({ from: process.env.EMAIL_FROM || 'Costarax <noreply@costarax.ph>', to, subject, html })
+    const transporter = nodemailer.createTransport({
+      host: process.env.EMAIL_HOST,
+      port: parseInt(process.env.EMAIL_PORT || '587'),
+      secure: process.env.EMAIL_PORT === '465',
+      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+    })
+    await transporter.sendMail({ from: FROM, to, subject, html })
     return { ok: true }
   } catch (err) { console.error('[Email error]', err.message); return { ok: false, error: err.message } }
 }
