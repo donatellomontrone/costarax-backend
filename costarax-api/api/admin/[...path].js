@@ -5,7 +5,13 @@ const businessesAction = require('../../lib/admin-routes/businesses-action')
 const paymentsIndex = require('../../lib/admin-routes/payments')
 
 module.exports = async (req, res) => {
-  const path = Array.isArray(req.query.path) ? req.query.path : [req.query.path].filter(Boolean)
+  const queryPath = Array.isArray(req.query.path) ? req.query.path : [req.query.path].filter(Boolean)
+  const urlPath = (req.url || '')
+    .split('?')[0]
+    .replace(/^\/api\/admin\/?/, '')
+    .split('/')
+    .filter(Boolean)
+  const path = queryPath.length ? queryPath : urlPath
   const [resource, id, action] = path
 
   if (resource === 'suppliers' && path.length === 1) {
