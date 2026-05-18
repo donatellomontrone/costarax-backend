@@ -1,15 +1,61 @@
-const { supabaseAdmin, verifyToken } = require('../lib/supabase-admin')
+const { supabaseAdmin, verifyToken, requireAuth } = require('../lib/supabase-admin')
 
 const CORS_H = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,OPTIONS',
+  'Access-Control-Allow-Methods': 'GET,PATCH,OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type,Authorization'
 }
+
+// Fields a supplier can edit themselves (no name/tin/verified/plan/status/trial)
+const SUPPLIER_EDITABLE = [
+  'tagline', 'description', 'categories', 'category', 'certifications',
+  'delivery_days', 'city', 'region', 'delivery_areas',
+  'minimum_order_php', 'payment_terms', 'credit_terms',
+  'lead_time_days', 'price_validity_days',
+  'contact_name', 'contact_phone', 'contact_email',
+  'years_in_business', 'vat_registered', 'cold_chain', 'sample_available',
+]
 
 module.exports = async (req, res) => {
   try {
     Object.entries(CORS_H).forEach(([k, v]) => res.setHeader(k, v))
     if (req.method === 'OPTIONS') return res.status(200).end()
+
+    // ── PATCH /api/suppliers — supplier self-update ───────────────────────
+    if (req.method === 'PATCH') {
+      const auth = await requireAuth(req, res)
+      if (!auth) return
+
+      // Look up which supplier this user belongs to
+      const { data: orgMember } = await supabaseAdmin
+        .from('organization_members')
+        .select('supplier_id')
+        .eq('user_id', auth.user.id)
+        .single()
+
+      if (!orgMember?.supplier_id) {
+        return res.status(403).json({ error: 'No supplier account linked to this user' })
+      }
+
+      const body = req.body || {}
+      const updates = {}
+      for (const key of SUPPLIER_EDITABLE) {
+        if (body[key] !== undefined) updates[key] = body[key]
+      }
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: 'No valid fields to update' })
+      }
+      updates.updated_at = new Date().toISOString()
+
+      const { error } = await supabaseAdmin
+        .from('suppliers')
+        .update(updates)
+        .eq('id', orgMember.supplier_id)
+
+      if (error) return res.status(500).json({ error: error.message })
+      return res.status(200).json({ message: 'Profile updated' })
+    }
+
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' })
 
     const token = req.headers.authorization?.replace('Bearer ', '')
