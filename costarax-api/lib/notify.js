@@ -72,6 +72,10 @@ const WA_TEMPLATES = {
     name: 'costarax_order_fulfilled',
     placeholders: ({ supplierName }) => [supplierName],
   },
+  quote_stale: {
+    name: 'costarax_quote_stale',
+    placeholders: ({ buyerName }) => [buyerName],
+  },
 }
 
 // SMS fallback uses plain text
@@ -84,6 +88,8 @@ const SMS_TEMPLATES = {
     `[Costarax] ${buyerName} confirmed an order with you. costarax.com`,
   order_fulfilled: ({ supplierName }) =>
     `[Costarax] Order from ${supplierName} fulfilled. Rate at costarax.com`,
+  quote_stale: ({ buyerName }) =>
+    `[Costarax] Reminder: ${buyerName} is waiting for your quote reply. Reply at costarax.com`,
 }
 
 async function sendWhatsApp(to, event, data, cfg) {

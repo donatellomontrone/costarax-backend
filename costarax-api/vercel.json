@@ -1,4 +1,10 @@
 {
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "0 2 * * *"
+    }
+  ],
   "functions": {
     "api/**/*.js": {
       "memory": 512,
