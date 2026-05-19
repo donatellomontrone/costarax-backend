@@ -63,7 +63,7 @@ module.exports = async (req, res) => {
       const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
         request.contact_email, {
           data: { role: 'supplier', company: request.company_name },
-          redirectTo: `${process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.vercel.app'}/login.html`
+          redirectTo: 'https://costarax.com/login.html'
         }
       )
       if (inviteErr) {
@@ -114,7 +114,7 @@ module.exports = async (req, res) => {
       const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
         request.contact_email, {
           data: { role: 'buyer', company: request.company_name },
-          redirectTo: `${process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.vercel.app'}/login.html`
+          redirectTo: 'https://costarax.com/login.html'
         }
       )
       if (inviteErr) {

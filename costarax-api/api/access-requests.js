@@ -55,10 +55,9 @@ module.exports = async (req, res) => {
       .single()
 
     // Notify admin
-    if (process.env.EMAIL_USER) {
-      const tpl = accessRequestEmail({ companyName: company_name, contactEmail: contact_email, businessType: business_type })
-      await sendEmail({ to: process.env.EMAIL_USER, ...tpl })
-    }
+    const adminEmail = process.env.ADMIN_EMAIL || 'donatello@costarax.com'
+    const tpl = accessRequestEmail({ companyName: company_name, contactEmail: contact_email, businessType: business_type })
+    await sendEmail({ to: adminEmail, ...tpl }).catch(() => {})
 
     return res.status(201).json({
       id: inserted?.id || null,
