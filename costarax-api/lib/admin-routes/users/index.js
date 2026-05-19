@@ -103,13 +103,20 @@ module.exports = async (req, res) => {
     const resetLink = linkData?.properties?.action_link || linkData?.action_link
     if (!resetLink) return res.status(500).json({ error: 'Could not generate reset link' })
 
-    await sendEmail({
+    const emailResult = await sendEmail({
       to:      targetEmail,
       subject: 'Reset your Costarax password',
       html:    `<p>An admin has requested a password reset for your Costarax account.</p><p><a href="${resetLink}" style="display:inline-block;padding:10px 20px;background:#1a7a4a;color:#fff;border-radius:6px;text-decoration:none;font-weight:600">Reset my password</a></p><p style="font-size:12px;color:#888">This link expires in 1 hour. If you did not request this, you can ignore this email.</p>`,
     })
 
-    return res.status(200).json({ message: `Password reset email sent to ${targetEmail}`, link: resetLink })
+    const emailSent = emailResult?.ok !== false
+    return res.status(200).json({
+      message: emailSent
+        ? `Reset email sent to ${targetEmail}`
+        : `Email delivery failed — send the backup link below to the user`,
+      link: resetLink,
+      emailSent,
+    })
   }
 
   return res.status(405).json({ error: 'Method not allowed' })
