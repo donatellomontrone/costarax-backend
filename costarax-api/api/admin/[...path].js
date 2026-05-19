@@ -4,6 +4,7 @@ const accessRequestsAction = require('../../lib/admin-routes/access-requests-act
 const businessesAction = require('../../lib/admin-routes/businesses-action')
 const paymentsIndex = require('../../lib/admin-routes/payments')
 const usersIndex = require('../../lib/admin-routes/users')
+const cronIndex = require('../../lib/admin-routes/cron')
 
 module.exports = async (req, res) => {
   const queryPath = Array.isArray(req.query.path) ? req.query.path : [req.query.path].filter(Boolean)
@@ -42,6 +43,10 @@ module.exports = async (req, res) => {
 
   if (resource === 'users') {
     return usersIndex(req, res)
+  }
+
+  if (resource === 'cron') {
+    return cronIndex(req, res)
   }
 
   return res.status(404).json({ error: 'Admin route not found' })

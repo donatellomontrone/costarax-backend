@@ -4,9 +4,9 @@
 //
 // Vercel calls this with: Authorization: Bearer <CRON_SECRET>
 
-const { supabaseAdmin } = require('../../lib/supabase-admin')
-const { sendEmail } = require('../../lib/email')
-const { notify } = require('../../lib/notify')
+const { supabaseAdmin } = require('../../supabase-admin')
+const { sendEmail } = require('../../email')
+const { notify } = require('../../notify')
 
 const CORS_H = {
   'Access-Control-Allow-Origin': '*',
