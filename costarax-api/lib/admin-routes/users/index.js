@@ -109,7 +109,7 @@ module.exports = async (req, res) => {
       html:    `<p>An admin has requested a password reset for your Costarax account.</p><p><a href="${resetLink}" style="display:inline-block;padding:10px 20px;background:#1a7a4a;color:#fff;border-radius:6px;text-decoration:none;font-weight:600">Reset my password</a></p><p style="font-size:12px;color:#888">This link expires in 1 hour. If you did not request this, you can ignore this email.</p>`,
     })
 
-    return res.status(200).json({ message: `Password reset email sent to ${targetEmail}` })
+    return res.status(200).json({ message: `Password reset email sent to ${targetEmail}`, link: resetLink })
   }
 
   return res.status(405).json({ error: 'Method not allowed' })
