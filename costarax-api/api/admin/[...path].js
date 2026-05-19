@@ -7,6 +7,9 @@ const usersIndex = require('../../lib/admin-routes/users')
 const cronIndex = require('../../lib/admin-routes/cron')
 
 module.exports = async (req, res) => {
+  // Handle CORS preflight before any auth checks
+  if (req.method === 'OPTIONS') return res.status(200).end()
+
   const queryPath = Array.isArray(req.query.path) ? req.query.path : [req.query.path].filter(Boolean)
   const urlPath = (req.url || '')
     .split('?')[0]
