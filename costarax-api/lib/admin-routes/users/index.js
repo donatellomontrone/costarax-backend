@@ -43,11 +43,14 @@ module.exports = async (req, res) => {
     const { id, role, email } = req.body || {}
     if (!id) return res.status(400).json({ error: 'User id is required' })
 
-    const VALID_ROLES = ['admin', 'business', 'supplier']
+    // Frontend uses 'business' label; DB enum uses 'buyer'.
+    const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier']
+    const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier' }
 
     if (role !== undefined) {
-      if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}` })
-      const { error } = await supabaseAdmin.from('profiles').update({ role }).eq('id', id)
+      if (!VALID_UI_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: admin, business, supplier` })
+      const dbRole = TO_DB_ROLE[role]
+      const { error } = await supabaseAdmin.from('profiles').update({ role: dbRole }).eq('id', id)
       if (error) return res.status(500).json({ error: error.message })
     }
 
