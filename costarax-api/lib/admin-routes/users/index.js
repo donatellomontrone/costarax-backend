@@ -1,6 +1,6 @@
 // Admin: user management — list, update role/email, send password reset
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
-const { sendEmail, adminCreatedAccountEmail } = require('../../email')
+const { sendEmail, adminCreatedAccountEmail, adminRoleChangedEmail } = require('../../email')
 const { enforce } = require('../../rate-limit')
 
 module.exports = async (req, res) => {
@@ -47,11 +47,19 @@ module.exports = async (req, res) => {
     const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier']
     const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier' }
 
+    let roleChanged = null  // { oldRole, newRole } if role actually changed
     if (role !== undefined) {
       if (!VALID_UI_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: admin, business, supplier` })
       const dbRole = TO_DB_ROLE[role]
+
+      // Read current role first to detect a real change and notify the user.
+      const { data: before } = await supabaseAdmin.from('profiles').select('role').eq('id', id).single()
+      const oldRole = before?.role || null
+
       const { error } = await supabaseAdmin.from('profiles').update({ role: dbRole }).eq('id', id)
       if (error) return res.status(500).json({ error: error.message })
+
+      if (oldRole !== dbRole) roleChanged = { oldRole, newRole: dbRole }
     }
 
     if (email?.trim()) {
@@ -62,7 +70,21 @@ module.exports = async (req, res) => {
       await supabaseAdmin.from('profiles').update({ email: newEmail }).eq('id', id).catch(() => {})
     }
 
-    return res.status(200).json({ message: 'User updated' })
+    // Notify user of role change (after all updates so we use the freshest email).
+    let roleEmailSent = false
+    if (roleChanged) {
+      try {
+        const { data: u } = await supabaseAdmin.auth.admin.getUserById(id)
+        const targetEmail = u?.user?.email
+        if (targetEmail) {
+          const tpl = adminRoleChangedEmail({ contactEmail: targetEmail, oldRole: roleChanged.oldRole, newRole: roleChanged.newRole })
+          const r = await sendEmail({ to: targetEmail, ...tpl })
+          roleEmailSent = r?.ok === true
+        }
+      } catch (e) { console.error('[patch-user] role-change email failed', e.message) }
+    }
+
+    return res.status(200).json({ message: 'User updated', roleChanged: !!roleChanged, roleEmailSent })
   }
 
   // ── POST — create user OR send password reset email ──────────────────────

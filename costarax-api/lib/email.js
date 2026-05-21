@@ -139,6 +139,22 @@ function accessApprovedEmail({ companyName, contactEmail }) {
   return { subject: 'Your Costarax access has been approved', html: layout('Access approved — Costarax', body) }
 }
 
+function adminRoleChangedEmail({ contactEmail, oldRole, newRole }) {
+  const labelOf = r => r === 'admin' ? 'Administrator' : r === 'supplier' ? 'Supplier' : r === 'buyer' ? 'Business buyer' : (r || '—')
+  const body = `
+    ${h2('Your Costarax role has been updated')}
+    ${p('A Costarax administrator changed your account role.')}
+    ${table(
+      row('Account:', contactEmail || '—'),
+      row('Previous role:', labelOf(oldRole)),
+      row('New role:', `<strong>${labelOf(newRole)}</strong>`),
+    )}
+    ${highlight('You may see different sections and permissions in the platform after your next login. If this change was unexpected, contact us at hello@costarax.com immediately.')}
+    ${btn(`${APP_URL}/login.html`, 'Go to Costarax')}
+  `
+  return { subject: 'Your Costarax role has been updated', html: layout('Role updated — Costarax', body) }
+}
+
 function adminCreatedAccountEmail({ contactEmail, role, resetLink }) {
   const roleLabel = role === 'admin' ? 'Administrator' : role === 'supplier' ? 'Supplier' : 'Business buyer'
   const body = `
@@ -178,4 +194,4 @@ function orderFulfilledEmail({ buyerName, supplierName, products }) {
   return { subject: `Your order has been fulfilled by ${supplierName} — Costarax`, html: layout('Order fulfilled — Costarax', body) }
 }
 
-module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail, adminCreatedAccountEmail, orderConfirmedEmail, orderFulfilledEmail }
+module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail, adminCreatedAccountEmail, adminRoleChangedEmail, orderConfirmedEmail, orderFulfilledEmail }
