@@ -3,7 +3,21 @@ const nodemailer = require('nodemailer')
 const FROM = process.env.EMAIL_FROM || 'Costarax <onboarding@resend.dev>'
 
 async function sendEmail({ to, subject, html }) {
-  // Prefer Resend SDK when RESEND_API_KEY is set
+  // Prefer SMTP (Brevo) when EMAIL_HOST is configured
+  if (process.env.EMAIL_HOST && process.env.EMAIL_USER) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: process.env.EMAIL_HOST,
+        port: parseInt(process.env.EMAIL_PORT || '587'),
+        secure: process.env.EMAIL_PORT === '465',
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+      })
+      await transporter.sendMail({ from: FROM, to, subject, html })
+      return { ok: true }
+    } catch (err) { console.error('[SMTP error]', err.message); return { ok: false, error: err.message } }
+  }
+
+  // Fallback: Resend SDK
   if (process.env.RESEND_API_KEY) {
     try {
       const { Resend } = require('resend')
@@ -14,18 +28,8 @@ async function sendEmail({ to, subject, html }) {
     } catch (err) { console.error('[Resend error]', err.message); return { ok: false, error: err.message } }
   }
 
-  // Fallback: nodemailer SMTP
-  if (!process.env.EMAIL_USER) { console.log('[Email skipped — no provider configured]', { to, subject }); return { ok: true } }
-  try {
-    const transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST,
-      port: parseInt(process.env.EMAIL_PORT || '587'),
-      secure: process.env.EMAIL_PORT === '465',
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-    })
-    await transporter.sendMail({ from: FROM, to, subject, html })
-    return { ok: true }
-  } catch (err) { console.error('[Email error]', err.message); return { ok: false, error: err.message } }
+  console.log('[Email skipped — no provider configured]', { to, subject })
+  return { ok: true }
 }
 
 const APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.vercel.app'
