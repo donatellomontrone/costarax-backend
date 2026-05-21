@@ -85,13 +85,25 @@ module.exports = async (req, res) => {
       })
       if (createErr) return res.status(500).json({ error: createErr.message })
 
-      // Set role in profiles
-      if (role) {
-        await supabaseAdmin.from('profiles')
-          .upsert({ id: created.user.id, email: email.trim().toLowerCase(), role }, { onConflict: 'id' })
-          .catch(() => {})
+      // Set role in profiles (frontend may send UI role 'business' for buyers)
+      const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier' }
+      const dbRole = TO_DB_ROLE[role] || 'buyer'
+      const { error: upsertErr } = await supabaseAdmin.from('profiles')
+        .upsert({
+          id: created.user.id,
+          email: email.trim().toLowerCase(),
+          role: dbRole,
+          status: 'approved',
+        }, { onConflict: 'id' })
+
+      if (upsertErr) {
+        console.error('[create-user] profile upsert failed:', upsertErr.message)
+        return res.status(500).json({
+          error: `User created but role assignment failed: ${upsertErr.message}. Set the role manually.`,
+          id: created.user.id,
+        })
       }
-      return res.status(201).json({ message: 'User created', id: created.user.id })
+      return res.status(201).json({ message: 'User created', id: created.user.id, role: dbRole })
     }
     if (!id && !email) return res.status(400).json({ error: 'User id or email required' })
 
