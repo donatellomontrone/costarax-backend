@@ -1,31 +1,38 @@
 const { supabaseAdmin } = require('../lib/supabase-admin')
 const { sendEmail, accessRequestEmail } = require('../lib/email')
-
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization'
-}
+const { applyCors } = require('../lib/cors')
+const { enforce, clientIp } = require('../lib/rate-limit')
 
 module.exports = async (req, res) => {
-  Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v))
-  if (req.method === 'OPTIONS') return res.status(200).end()
+  if (applyCors(req, res, { methods: 'POST,OPTIONS' })) return
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
+
+  // Rate limit: 5 requests / hour per IP. Public endpoint, no auth.
+  if (!(await enforce(req, res, { bucket: 'access-requests', identifier: clientIp(req), max: 5, windowSec: 3600 }))) return
 
   try {
     const body = req.body || {}
-    const company_name   = (body.company_name || '').trim()
-    const contact_email  = (body.contact_email || '').trim().toLowerCase()
-    const business_type  = (body.business_type || '').trim()
-    const tin            = (body.tin || '').trim() || null
-    const contact_phone  = (body.contact_phone || '').trim() || null
-    const city           = (body.city || '').trim() || null
-    const region         = (body.region || '').trim() || null
+    const clip = (v, n) => String(v || '').trim().slice(0, n)
+
+    const company_name   = clip(body.company_name, 200)
+    const contact_email  = clip(body.contact_email, 200).toLowerCase()
+    const business_type  = clip(body.business_type, 60)
+    const tin            = clip(body.tin, 32) || null
+    const contact_phone  = clip(body.contact_phone, 32) || null
+    const city           = clip(body.city, 80) || null
+    const region         = clip(body.region, 80) || null
     const requested_role = body.requested_role === 'supplier' ? 'supplier' : 'buyer'
 
     if (!contact_email)  return res.status(400).json({ error: 'contact_email is required' })
     if (!company_name)   return res.status(400).json({ error: 'company_name is required' })
     if (!business_type)  return res.status(400).json({ error: 'business_type is required' })
+
+    // RFC-light email check + reject any HTML/control chars
+    const EMAIL_RE = /^[^\s<>"'`\\;]+@[^\s<>"'`\\;]+\.[^\s<>"'`\\;]+$/
+    if (!EMAIL_RE.test(contact_email)) return res.status(400).json({ error: 'invalid contact_email' })
+    if (/[<>]/.test(company_name + business_type + (tin||'') + (contact_phone||'') + (city||'') + (region||''))) {
+      return res.status(400).json({ error: 'invalid characters in form fields' })
+    }
 
     // Insert without custom id — let DB generate it
     const { error: insertErr } = await supabaseAdmin

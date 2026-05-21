@@ -1,12 +1,7 @@
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
 
-const CORS_H = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,PATCH,DELETE,OPTIONS','Access-Control-Allow-Headers':'Content-Type,Authorization'}
-
 module.exports = async (req, res) => {
   try {
-    Object.entries(CORS_H).forEach(([k,v]) => res.setHeader(k,v))
-    if (req.method === 'OPTIONS') return res.status(200).end()
-
     const auth = await requireAdmin(req, res)
     if (!auth) return
 

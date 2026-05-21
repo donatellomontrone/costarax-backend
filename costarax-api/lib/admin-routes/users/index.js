@@ -1,6 +1,7 @@
 // Admin: user management — list, update role/email, send password reset
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
 const { sendEmail } = require('../../email')
+const { enforce } = require('../../rate-limit')
 
 module.exports = async (req, res) => {
   const auth = await requireAdmin(req, res)
@@ -68,6 +69,12 @@ module.exports = async (req, res) => {
     // Create a new user
     if (action === 'create') {
       if (!email?.trim() || !password) return res.status(400).json({ error: 'Email and password required' })
+
+      // Enforce password policy server-side (frontend check is bypassable)
+      if (password.length < 10) return res.status(400).json({ error: 'Password must be at least 10 characters.' })
+      if (!/[A-Za-z]/.test(password)) return res.status(400).json({ error: 'Password must include at least one letter.' })
+      if (!/\d/.test(password)) return res.status(400).json({ error: 'Password must include at least one digit.' })
+
       const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
         email: email.trim().toLowerCase(),
         password,
@@ -92,6 +99,9 @@ module.exports = async (req, res) => {
       targetEmail = u?.user?.email
     }
     if (!targetEmail) return res.status(404).json({ error: 'User not found' })
+
+    // Rate limit reset emails: 3 per hour per target email to prevent abuse/spam.
+    if (!(await enforce(req, res, { bucket: 'admin-reset-email', identifier: targetEmail, max: 3, windowSec: 3600 }))) return
 
     const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
       type: 'recovery',

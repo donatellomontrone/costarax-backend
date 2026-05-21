@@ -1,10 +1,6 @@
 const Anthropic = require('@anthropic-ai/sdk');
-
-const CORS_H = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type'
-};
+const { applyCors } = require('../lib/cors');
+const { enforce, clientIp } = require('../lib/rate-limit');
 
 const SYSTEM = `You are the Costarax support assistant — helpful, concise, and direct.
 
@@ -37,9 +33,11 @@ If asked about pricing for suppliers: say to contact the team via the form.
 Keep replies short — 2-4 sentences max unless more detail is clearly needed. No bullet lists unless the question needs a structured answer. Never make up facts.`;
 
 module.exports = async (req, res) => {
-  Object.entries(CORS_H).forEach(([k, v]) => res.setHeader(k, v));
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (applyCors(req, res, { methods: 'POST,OPTIONS' })) return;
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  // Rate limit: 20 messages / hour per IP (chat is public + costs money per call).
+  if (!(await enforce(req, res, { bucket: 'chat', identifier: clientIp(req), max: 20, windowSec: 3600 }))) return;
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(200).json({ reply: "Hi! I'm the Costarax assistant. Our AI support is being set up — in the meantime, fill the access request form on this page and our team will get back to you within 24h." });

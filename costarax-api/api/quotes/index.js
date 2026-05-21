@@ -1,16 +1,10 @@
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { sendEmail, quoteReceivedEmail } = require('../../lib/email')
 const { notify } = require('../../lib/notify')
-
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization'
-}
+const { applyCors } = require('../../lib/cors')
 
 module.exports = async (req, res) => {
-  Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v))
-  if (req.method === 'OPTIONS') return res.status(200).end()
+  if (applyCors(req, res, { methods: 'GET,POST,OPTIONS' })) return
 
   const auth = await requireAuth(req, res)
   if (!auth) return

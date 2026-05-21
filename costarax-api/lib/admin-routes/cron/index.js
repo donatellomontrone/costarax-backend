@@ -8,24 +8,19 @@ const { supabaseAdmin } = require('../../supabase-admin')
 const { sendEmail } = require('../../email')
 const { notify } = require('../../notify')
 
-const CORS_H = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-}
-
 const FREQ_DAYS = { weekly: 7, biweekly: 14, monthly: 30 }
 
 module.exports = async (req, res) => {
-  Object.entries(CORS_H).forEach(([k, v]) => res.setHeader(k, v))
-  if (req.method === 'OPTIONS') return res.status(200).end()
+  // Cron is invoked server-to-server by Vercel; no CORS needed.
 
-  // Verify cron secret (Vercel sets this automatically when CRON_SECRET is configured)
+  // Verify cron secret — REQUIRED. Without this, the cron endpoint is open to abuse.
   const secret = process.env.CRON_SECRET
-  if (secret) {
-    const auth = req.headers.authorization || ''
-    if (auth !== `Bearer ${secret}`) return res.status(401).json({ error: 'Unauthorized' })
+  if (!secret) {
+    console.error('[cron] CRON_SECRET env var is not set — refusing to run')
+    return res.status(503).json({ error: 'Cron secret not configured' })
   }
+  const auth = req.headers.authorization || ''
+  if (auth !== `Bearer ${secret}`) return res.status(401).json({ error: 'Unauthorized' })
 
   const results = { recurring: [], stale: [], errors: [] }
 

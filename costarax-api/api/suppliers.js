@@ -1,11 +1,6 @@
 const { supabaseAdmin, verifyToken, requireAuth } = require('../lib/supabase-admin')
 const { sendEmail } = require('../lib/email')
-
-const CORS_H = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,POST,PATCH,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization'
-}
+const { applyCors } = require('../lib/cors')
 
 // Fields a supplier can edit themselves (no name/tin/verified/plan/status/trial)
 const SUPPLIER_EDITABLE = [
@@ -19,8 +14,7 @@ const SUPPLIER_EDITABLE = [
 
 module.exports = async (req, res) => {
   try {
-    Object.entries(CORS_H).forEach(([k, v]) => res.setHeader(k, v))
-    if (req.method === 'OPTIONS') return res.status(200).end()
+    if (applyCors(req, res, { methods: 'GET,POST,PATCH,OPTIONS' })) return
 
     // ── PATCH /api/suppliers — supplier self-update ───────────────────────
     if (req.method === 'PATCH') {
