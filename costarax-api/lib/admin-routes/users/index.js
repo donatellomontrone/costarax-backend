@@ -100,8 +100,15 @@ module.exports = async (req, res) => {
     })
     if (linkErr) return res.status(500).json({ error: linkErr.message })
 
-    const resetLink = linkData?.properties?.action_link || linkData?.action_link
+    let resetLink = linkData?.properties?.action_link || linkData?.action_link
     if (!resetLink) return res.status(500).json({ error: 'Could not generate reset link' })
+
+    // Force redirect_to to costarax.com — Supabase falls back to Site URL (localhost) otherwise
+    try {
+      const u = new URL(resetLink)
+      u.searchParams.set('redirect_to', 'https://costarax.com/app.html')
+      resetLink = u.toString()
+    } catch (e) { /* leave as-is */ }
 
     const emailResult = await sendEmail({
       to:      targetEmail,
