@@ -43,8 +43,19 @@ async function requireAuth(req, res) {
 async function requireAdmin(req, res) {
   const auth = await requireAuth(req, res)
   if (!auth) return null
-  if (auth.profile.role !== 'admin') { res.status(403).json({ error: 'Admin access required' }); return null }
+  if (!['admin', 'super_admin'].includes(auth.profile.role)) {
+    res.status(403).json({ error: 'Admin access required' }); return null
+  }
   return auth
 }
- 
-module.exports = { supabaseAdmin, verifyToken, getProfile, requireAuth, requireAdmin }
+
+async function requireSuperAdmin(req, res) {
+  const auth = await requireAuth(req, res)
+  if (!auth) return null
+  if (auth.profile.role !== 'super_admin') {
+    res.status(403).json({ error: 'Super-admin access required' }); return null
+  }
+  return auth
+}
+
+module.exports = { supabaseAdmin, verifyToken, getProfile, requireAuth, requireAdmin, requireSuperAdmin }

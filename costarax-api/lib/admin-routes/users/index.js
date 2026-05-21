@@ -1,5 +1,5 @@
-// Admin: user management — list, update role/email, send password reset
-const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
+// Admin: user management — list, update role/email, send password reset, delete (super-admin only)
+const { supabaseAdmin, requireAdmin, requireSuperAdmin } = require('../../supabase-admin')
 const { sendEmail, adminCreatedAccountEmail, adminRoleChangedEmail } = require('../../email')
 const { enforce } = require('../../rate-limit')
 
@@ -44,17 +44,25 @@ module.exports = async (req, res) => {
     if (!id) return res.status(400).json({ error: 'User id is required' })
 
     // Frontend uses 'business' label; DB enum uses 'buyer'.
-    const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier']
-    const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier' }
+    const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier', 'super_admin']
+    const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier', super_admin: 'super_admin' }
 
     let roleChanged = null  // { oldRole, newRole } if role actually changed
     if (role !== undefined) {
-      if (!VALID_UI_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: admin, business, supplier` })
+      if (!VALID_UI_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: admin, business, supplier, super_admin` })
       const dbRole = TO_DB_ROLE[role]
 
       // Read current role first to detect a real change and notify the user.
       const { data: before } = await supabaseAdmin.from('profiles').select('role').eq('id', id).single()
       const oldRole = before?.role || null
+
+      // Only super-admins can grant or revoke super_admin, and they cannot demote themselves.
+      if ((dbRole === 'super_admin' || oldRole === 'super_admin') && auth.profile.role !== 'super_admin') {
+        return res.status(403).json({ error: 'Only a super-admin can change the super_admin role.' })
+      }
+      if (oldRole === 'super_admin' && id === auth.user.id) {
+        return res.status(400).json({ error: 'Super-admins cannot demote themselves. Ask another super-admin.' })
+      }
 
       const { error } = await supabaseAdmin.from('profiles').update({ role: dbRole }).eq('id', id)
       if (error) return res.status(500).json({ error: error.message })
@@ -205,6 +213,39 @@ module.exports = async (req, res) => {
         error: emailResult?.error || null,
       },
     })
+  }
+
+  // ── DELETE — permanently delete a user (super-admin only) ───────────────
+  if (req.method === 'DELETE') {
+    // Re-check super-admin (requireAdmin only checks admin/super_admin).
+    if (auth.profile.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only a super-admin can delete users.' })
+    }
+
+    const id = req.query.id || req.body?.id
+    if (!id) return res.status(400).json({ error: 'User id is required' })
+    if (id === auth.user.id) return res.status(400).json({ error: 'You cannot delete your own account.' })
+
+    // Block deletion of other super-admins to prevent accidental wipeout.
+    const { data: target } = await supabaseAdmin.from('profiles').select('role,email').eq('id', id).single()
+    if (target?.role === 'super_admin') {
+      return res.status(400).json({ error: 'Cannot delete another super-admin. Demote them first.' })
+    }
+
+    // Best-effort cleanup of org_members; auth user delete cascades to profiles.
+    await supabaseAdmin.from('organization_members').delete().eq('user_id', id).catch(() => {})
+
+    const { error } = await supabaseAdmin.auth.admin.deleteUser(id)
+    if (error) return res.status(500).json({ error: error.message })
+
+    await supabaseAdmin.from('admin_actions').insert({
+      admin_id: auth.user.id,
+      action_type: 'delete_user',
+      target_id: id,
+      notes: `Deleted user: ${target?.email || id}`,
+    }).catch(() => {})
+
+    return res.status(200).json({ message: 'User deleted', id })
   }
 
   return res.status(405).json({ error: 'Method not allowed' })

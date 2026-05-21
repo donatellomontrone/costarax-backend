@@ -45,6 +45,8 @@ module.exports = async (req, res) => {
   }
 
   if (resource === 'users') {
+    // /api/admin/users/<id>  → expose id via req.query.id (used by DELETE)
+    if (path.length === 2) req.query.id = id
     return usersIndex(req, res)
   }
 
