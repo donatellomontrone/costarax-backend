@@ -1,6 +1,6 @@
 // Admin: user management — list, update role/email, send password reset
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
-const { sendEmail } = require('../../email')
+const { sendEmail, adminCreatedAccountEmail } = require('../../email')
 const { enforce } = require('../../rate-limit')
 
 module.exports = async (req, res) => {
@@ -103,7 +103,34 @@ module.exports = async (req, res) => {
           id: created.user.id,
         })
       }
-      return res.status(201).json({ message: 'User created', id: created.user.id, role: dbRole })
+
+      // Generate a one-time set-password link and notify the new user.
+      let resetLink = null
+      try {
+        const { data: linkData } = await supabaseAdmin.auth.admin.generateLink({
+          type: 'recovery',
+          email: email.trim().toLowerCase(),
+          options: { redirectTo: 'https://costarax.com/app.html' },
+        })
+        resetLink = linkData?.properties?.action_link || linkData?.action_link || null
+        if (resetLink) {
+          try {
+            const u = new URL(resetLink)
+            u.searchParams.set('redirect_to', 'https://costarax.com/app.html')
+            resetLink = u.toString()
+          } catch {}
+        }
+      } catch (e) { console.error('[create-user] generateLink failed', e.message) }
+
+      const tpl = adminCreatedAccountEmail({ contactEmail: email.trim().toLowerCase(), role: dbRole, resetLink })
+      const emailRes = await sendEmail({ to: email.trim().toLowerCase(), ...tpl })
+
+      return res.status(201).json({
+        message: 'User created',
+        id: created.user.id,
+        role: dbRole,
+        emailSent: emailRes?.ok === true,
+      })
     }
     if (!id && !email) return res.status(400).json({ error: 'User id or email required' })
 

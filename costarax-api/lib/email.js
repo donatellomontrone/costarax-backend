@@ -139,6 +139,23 @@ function accessApprovedEmail({ companyName, contactEmail }) {
   return { subject: 'Your Costarax access has been approved', html: layout('Access approved — Costarax', body) }
 }
 
+function adminCreatedAccountEmail({ contactEmail, role, resetLink }) {
+  const roleLabel = role === 'admin' ? 'Administrator' : role === 'supplier' ? 'Supplier' : 'Business buyer'
+  const body = `
+    ${h2('Your Costarax account is ready')}
+    ${p(`A Costarax administrator created an account for you with the role <strong>${roleLabel}</strong>.`)}
+    ${table(
+      row('Login email:', contactEmail || '—'),
+      row('Role:', roleLabel),
+      row('Platform:', `<a href="${APP_URL}/login.html" style="color:#1A5C3A;">${APP_URL}/login.html</a>`),
+    )}
+    ${highlight('Your administrator should share your initial password with you separately. We recommend changing it to a password only you know after your first login.')}
+    ${resetLink ? btn(resetLink, 'Set my password') : btn(`${APP_URL}/login.html`, 'Go to Costarax Login')}
+    ${p('<span style="font-size:12px;color:#7A7870;">Didn\'t expect this email? Contact us at hello@costarax.com to revoke the account.</span>')}
+  `
+  return { subject: 'Your Costarax account is ready', html: layout('Account created — Costarax', body) }
+}
+
 function orderConfirmedEmail({ supplierName, buyerName, orderNotes }) {
   const body = `
     ${h2('Order confirmed')}
@@ -161,4 +178,4 @@ function orderFulfilledEmail({ buyerName, supplierName, products }) {
   return { subject: `Your order has been fulfilled by ${supplierName} — Costarax`, html: layout('Order fulfilled — Costarax', body) }
 }
 
-module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail, orderConfirmedEmail, orderFulfilledEmail }
+module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail, adminCreatedAccountEmail, orderConfirmedEmail, orderFulfilledEmail }
