@@ -109,13 +109,20 @@ module.exports = async (req, res) => {
       html:    `<p>An admin has requested a password reset for your Costarax account.</p><p><a href="${resetLink}" style="display:inline-block;padding:10px 20px;background:#1a7a4a;color:#fff;border-radius:6px;text-decoration:none;font-weight:600">Reset my password</a></p><p style="font-size:12px;color:#888">This link expires in 1 hour. If you did not request this, you can ignore this email.</p>`,
     })
 
-    const emailSent = emailResult?.ok !== false
+    const emailSent = emailResult?.ok === true
     return res.status(200).json({
       message: emailSent
         ? `Reset email sent to ${targetEmail}`
-        : `Email delivery failed — send the backup link below to the user`,
+        : `Email delivery failed: ${emailResult?.error || 'unknown error'} — send the backup link below to the user`,
       link: resetLink,
       emailSent,
+      emailDebug: {
+        provider: process.env.EMAIL_HOST ? 'smtp' : (process.env.RESEND_API_KEY ? 'resend' : 'none'),
+        host: process.env.EMAIL_HOST || null,
+        user: process.env.EMAIL_USER ? process.env.EMAIL_USER.slice(0, 4) + '…' : null,
+        from: process.env.EMAIL_FROM || null,
+        error: emailResult?.error || null,
+      },
     })
   }
 
