@@ -60,8 +60,16 @@ async function handlePriceList(req, res) {
 
   let body
   try { body = await readJsonBody(req) } catch (e) { return res.status(400).json({ error: e.message }) }
-  const { text, file_name } = body || {}
-  if (!text || text.trim().length < 10) return res.status(400).json({ error: 'No content provided' })
+  // Accept either pasted text OR a base64-encoded file (PDF / image) for Claude Vision.
+  const { text, file_name, file_b64, file_mime } = body || {}
+  const hasText = typeof text === 'string' && text.trim().length >= 10
+  const hasFile = typeof file_b64 === 'string' && file_b64.length > 100 && typeof file_mime === 'string'
+  if (!hasText && !hasFile) return res.status(400).json({ error: 'No content provided' })
+  // Vercel Hobby plan caps JSON bodies at 4.5 MB. Stay safely under: ~3 MB raw
+  // → ~4 MB base64. Bigger PDFs should be split or compressed client-side first.
+  if (hasFile && file_b64.length > 4_000_000) {
+    return res.status(413).json({ error: 'File too large. Max ~3 MB. Try compressing the PDF or cropping the image.' })
+  }
 
   let supplierId = null, supplierName = 'Supplier'
   const { data: org } = await supabaseAdmin
@@ -84,24 +92,43 @@ async function handlePriceList(req, res) {
 
   let extracted = []
   try {
-    const prompt = `Extract products from this price list. Return JSON array only.
+    const ruleBlock = `Extract products from this price list. Return JSON array only.
 Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null}
 Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2).
 stock rules: if the source row has a stock/qty/available/inventory column with a number, return that number. If the row explicitly says "out of stock" / "OOS" / "sold out", return 0. Otherwise return null (do not guess).
 Category rules: meat=pork/beef/chicken/poultry, seafood=fish/shrimp/squid, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices, beverages=drinks/juice/water, packaging=boxes/bags/containers.
-Supplier: ${supplierName}
----
-${text.slice(0, 4000)}
----
-JSON:`
+Supplier: ${supplierName}`
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+    let userContent
+    let model = 'claude-haiku-4-5-20251001'
+
+    if (hasFile) {
+      // Build a multimodal content block. PDFs use the 'document' block (needs
+      // Sonnet — Haiku doesn't support PDF). Images go through Haiku just fine.
+      const isPdf   = /pdf/i.test(file_mime)
+      const isImage = /^image\//i.test(file_mime)
+      if (!isPdf && !isImage) {
+        return res.status(415).json({ error: `Unsupported file type "${file_mime}". Use PDF or image (jpg, png, webp).` })
+      }
+      if (isPdf) model = 'claude-sonnet-4-6'
+      userContent = [
+        {
+          type: isPdf ? 'document' : 'image',
+          source: { type: 'base64', media_type: file_mime, data: file_b64 }
+        },
+        { type: 'text', text: `${ruleBlock}\n\nThe price list is the attached ${isPdf ? 'PDF' : 'image'}. Read every product line and emit the JSON array. Output ONLY JSON.` }
+      ]
+    } else {
+      userContent = `${ruleBlock}\n---\n${text.slice(0, 4000)}\n---\nJSON:`
+    }
+
     const aiMsg = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 2000,
+      model,
+      max_tokens: hasFile ? 4000 : 2000,
       temperature: 0,
       system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
-      messages: [{ role: 'user', content: prompt }]
+      messages: [{ role: 'user', content: userContent }]
     })
     const content = aiMsg.content?.[0]?.text?.trim()
     if (!content) throw new Error('Empty response from Anthropic')
