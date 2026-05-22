@@ -32,7 +32,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 DROP TRIGGER IF EXISTS trg_supplier_prices_history ON public.supplier_prices;
 CREATE TRIGGER trg_supplier_prices_history
-AFTER INSERT OR UPDATE OF price_php ON public.supplier_prices
+AFTER INSERT OR UPDATE ON public.supplier_prices
 FOR EACH ROW EXECUTE FUNCTION public.record_supplier_price_change();
 
 -- Seed: one history row per existing active price, so the chart has at least 1 anchor point.
@@ -47,4 +47,11 @@ ALTER TABLE public.supplier_price_history ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "sph_public_read" ON public.supplier_price_history;
 CREATE POLICY "sph_public_read" ON public.supplier_price_history
-  FOR SELECT USING (true);
+  FOR SELECT
+  TO anon, authenticated
+  USING (true);
+
+-- Supabase quirk: the policy isn't enough — anon/authenticated also need
+-- the table-level SELECT grant or PostgREST returns 403 Forbidden.
+GRANT SELECT ON public.supplier_price_history TO anon;
+GRANT SELECT ON public.supplier_price_history TO authenticated;
