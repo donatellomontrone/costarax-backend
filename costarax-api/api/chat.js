@@ -39,12 +39,68 @@ const ESCALATION_RE = /\b(talk to (a )?human|real person|real human|speak to (an
 
 const ESCALATION_REPLY = "I've flagged this for the Costarax team — a human will jump in here as soon as one is available. Your message is saved and we'll reply on this same chat.";
 
-async function askAI(messagesArr) {
+// System prompt for in-app SUPPORT mode (user is already logged in).
+// Different from the public landing-page prompt: no "are you buyer or supplier" —
+// we already know — and points at specific in-app features.
+function supportSystemPrompt(ctx) {
+  const role = ctx?.role || 'buyer';
+  const name = (ctx?.businessName || ctx?.supplierName || '').trim();
+  const greeting = name ? `You're chatting with ${name} (${role}).` : `You're chatting with a verified ${role}.`;
+
+  const buyerHelp = `
+THE PERSON YOU'RE TALKING TO IS A BUYER. They use Costarax to:
+- Compare prices: tab "Compare prices" lists products from multiple suppliers side-by-side, with a 30-day price trend sparkline + delta chip (▲ rise / ▼ drop) and a "BUY NOW / WAIT / PRICE PEAK" badge.
+- Send quote requests (RFQs): click "+ Create RFQ" or click a price row to pre-fill a basket. Can send the same RFQ to multiple suppliers in one shot.
+- Track quotes: tab "My quotes" shows status (Awaiting reply → Reply received → Confirmed → Fulfilled). They can confirm orders, mark received, leave reviews.
+- Insights tab: spending by month, top suppliers, top products, market movers (biggest price drops/rises), Watchlist (⭐ products they track), My usuals (saved RFQ templates), Budget tracker (monthly spend caps per category).
+- My account: business profile, TIN, contact info.
+
+Useful tips you can give buyers:
+- To save an RFQ for reuse: click "+ Create RFQ" → fill items → "📋 Save as template" → name it. Find it in Insights > My usuals.
+- To watch a product: click the ☆ next to its name in Compare prices.
+- To set a budget: Insights > Budget card > "+ Set" → pick category.`;
+
+  const supplierHelp = `
+THE PERSON YOU'RE TALKING TO IS A SUPPLIER. They use Costarax to:
+- Upload price lists: tab "Products" → "⬆ Upload price list" → paste or attach. AI extracts products, prices, units automatically.
+- Manage catalog: tab "Products" lets them edit, hide, delete (single or bulk), set per-item stock quantities, and download their menu as CSV.
+- Add single item: in the ⋯ "More" dropdown of Products.
+- Reply to quote requests: tab "Quote requests" shows incoming RFQs grouped by status.
+- Activity tab: timeline of buyer interactions with search + filters.
+- Analytics tab: quote demand, conversion funnel, top buyers, top products requested, price competitiveness vs market, stock health, and your own price moves over 30d. Has 7d/30d/90d/Custom date filters.
+- My account: business profile, payment terms, delivery areas, contact info.
+
+Useful tips you can give suppliers:
+- To update stock: tab Products → click the stock badge of a row → enter quantity.
+- To download own catalog: Products > ⋯ menu > "Download my menu".
+- Bulk hide/delete products: tick the checkboxes, use the action bar.`;
+
+  return `You are the Costarax in-app support assistant — helpful, concise, direct.
+
+CONTEXT: ${greeting}
+DO NOT ask whether they are a buyer or a supplier — you already know. Tailor your reply to their role.
+
+ABOUT COSTARAX: A private B2B procurement intelligence platform for foodservice businesses in the Philippines. Connects buyers (restaurants, hotels, canteens) with verified suppliers. 380+ suppliers, 12,000+ AI-indexed products. Prices in ₱. UI in English / Filipino / Chinese.
+
+${role === 'supplier' ? supplierHelp : buyerHelp}
+
+RULES:
+- Be specific. Reference the actual tab name or button they should click.
+- Keep replies short: 2–3 sentences, max 4. No bullet lists unless they asked "how do I…" with multiple steps.
+- Never make up product prices, supplier names, quote numbers, or counts. If a question needs data you don't have, say so and offer to escalate.
+- If the user asks a question outside your scope (their company finances, legal, taxes, unrelated topics): politely redirect or offer to escalate to a human operator.
+- If the user complains about a specific supplier/buyer/order: acknowledge, gather one or two clarifying details, then offer to escalate ("Want me to bring in a Costarax team member?").
+- If you genuinely don't know, say "I don't know — want me to escalate this to a human?"
+- Mirror the user's language (English / Filipino / mixed Taglish are all fine).`;
+}
+
+async function askAI(messagesArr, ctx) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const system = ctx ? supportSystemPrompt(ctx) : SYSTEM;
   const msg = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 400,
-    system: SYSTEM,
+    system,
     messages: messagesArr.slice(-12).map(m => ({ role: m.role, content: String(m.content).slice(0, 1000) }))
   });
   return msg.content[0]?.text?.trim() || '';
@@ -62,6 +118,31 @@ async function handleSupportMode(req, res, body) {
   const userRole = profile?.role || 'buyer';
   const isAdmin  = ['admin','super_admin'].includes(userRole);
 
+  // Resolve a display name + simple ctx for the AI prompt.
+  async function resolveCtx() {
+    const ctx = { role: userRole === 'buyer' ? 'buyer' : userRole === 'supplier' ? 'supplier' : 'admin' };
+    try {
+      if (ctx.role === 'buyer') {
+        const { data: m } = await supabaseAdmin
+          .from('organization_members').select('business_id').eq('user_id', user.id).maybeSingle();
+        if (m?.business_id) {
+          const { data: b } = await supabaseAdmin
+            .from('businesses').select('name').eq('id', m.business_id).maybeSingle();
+          if (b?.name) ctx.businessName = b.name;
+        }
+      } else if (ctx.role === 'supplier') {
+        const { data: m } = await supabaseAdmin
+          .from('organization_members').select('supplier_id').eq('user_id', user.id).maybeSingle();
+        if (m?.supplier_id) {
+          const { data: s } = await supabaseAdmin
+            .from('suppliers').select('name').eq('id', m.supplier_id).maybeSingle();
+          if (s?.name) ctx.supplierName = s.name;
+        }
+      }
+    } catch (_) {}
+    return ctx;
+  }
+
   if (action === 'start') {
     // Find an existing open chat for this user; if none, create one.
     const { data: existing } = await supabaseAdmin
@@ -73,16 +154,21 @@ async function handleSupportMode(req, res, body) {
       .limit(1)
       .maybeSingle();
     if (existing) return res.status(200).json({ chat: existing });
+    const ctx = await resolveCtx();
     const { data: created, error } = await supabaseAdmin
       .from('support_chats')
-      .insert({ user_id: user.id, user_role: userRole === 'buyer' ? 'buyer' : userRole === 'supplier' ? 'supplier' : 'admin' })
+      .insert({ user_id: user.id, user_role: ctx.role })
       .select('id, status, started_at')
       .single();
     if (error) return res.status(500).json({ error: error.message });
-    // Greet the user with an opening AI message so the chat doesn't feel empty.
+    // Personalised opening greeting.
+    const name = (ctx.businessName || ctx.supplierName || '').trim();
+    const firstName = name ? name.split(/\s+/)[0] : '';
+    const greeting = ctx.role === 'supplier'
+      ? `Hi${firstName ? ` ${firstName}` : ''}! I can help with your catalog, quote requests, analytics or anything Costarax-related. What do you need?`
+      : `Hi${firstName ? ` ${firstName}` : ''}! I can help with finding suppliers, comparing prices, RFQs or your account. What can I help with today?`;
     await supabaseAdmin.from('support_messages').insert({
-      chat_id: created.id, sender: 'ai',
-      body: "Hi! I'm the Costarax assistant. I can help with quotes, suppliers, prices and your account. If you need a human, just say so and I'll bring one in."
+      chat_id: created.id, sender: 'ai', body: greeting
     });
     return res.status(200).json({ chat: created });
   }
@@ -147,7 +233,8 @@ async function handleSupportMode(req, res, body) {
     }
 
     try {
-      const aiReply = await askAI(conv);
+      const ctx = await resolveCtx();
+      const aiReply = await askAI(conv, ctx);
       await supabaseAdmin.from('support_messages').insert({ chat_id: chatId, sender: 'ai', body: aiReply });
       return res.status(200).json({ reply: aiReply });
     } catch (e) {
