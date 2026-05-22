@@ -84,8 +84,9 @@ async function handlePriceList(req, res) {
   let extracted = []
   try {
     const prompt = `Extract products from this price list. Return JSON array only.
-Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging"}
+Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null}
 Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2).
+stock rules: if the source row has a stock/qty/available/inventory column with a number, return that number. If the row explicitly says "out of stock" / "OOS" / "sold out", return 0. Otherwise return null (do not guess).
 Category rules: meat=pork/beef/chicken/poultry, seafood=fish/shrimp/squid, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices, beverages=drinks/juice/water, packaging=boxes/bags/containers.
 Supplier: ${supplierName}
 ---
@@ -155,23 +156,31 @@ JSON:`
   const validItems = extracted.filter(i => i.name && i.price && i.price > 0)
   const toCreate = []
   const priceRows = []
+  // Normalize stock value coming from the AI extractor: number ≥ 0 → kept, null/missing → null.
+  const parseStock = (v) => {
+    if (v === null || v === undefined || v === '') return null
+    const n = Number(v)
+    return Number.isFinite(n) && n >= 0 ? n : null
+  }
+
   for (const item of validItems) {
     const canonicalName = (item.canonical || item.name).trim()
     const category_id = VALID_CATEGORIES.includes(item.category) ? item.category : 'dry'
     const product = matchProduct(canonicalName)
     const unit = (item.unit || 'kg').trim()
-    if (product) priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), unit, active: true, updated_at: new Date().toISOString() })
-    else toCreate.push({ canonical_name: canonicalName, category_id, default_unit: unit, active: true, _price: parseFloat(item.price), _unit: unit })
+    const stock_qty = parseStock(item.stock)
+    if (product) priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
+    else toCreate.push({ canonical_name: canonicalName, category_id, default_unit: unit, active: true, _price: parseFloat(item.price), _unit: unit, _stock: stock_qty })
   }
 
   let created = 0, insertError = null, upsertError = null
   if (toCreate.length) {
-    const insertPayload = toCreate.map(({ _price, _unit, ...p }) => p)
+    const insertPayload = toCreate.map(({ _price, _unit, _stock, ...p }) => p)
     const { data: newProducts, error: iErr } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
     insertError = iErr?.message || null
     if (newProducts) {
       created = newProducts.length
-      newProducts.forEach((np, i) => priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, unit: toCreate[i]._unit, active: true, updated_at: new Date().toISOString() }))
+      newProducts.forEach((np, i) => priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, stock_qty: toCreate[i]._stock, unit: toCreate[i]._unit, active: true, updated_at: new Date().toISOString() }))
     }
   }
 
