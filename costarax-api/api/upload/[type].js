@@ -11,6 +11,7 @@
 const https = require('https')
 const fs = require('fs')
 const { formidable } = require('formidable')
+const Anthropic = require('@anthropic-ai/sdk')
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { applyCors } = require('../../lib/cors')
 
@@ -79,7 +80,7 @@ async function handlePriceList(req, res) {
     .select('id').single()
   const uploadId = uploadRecord?.id || null
 
-  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: 'GROQ_API_KEY not configured on server' })
+  if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured on server' })
 
   let extracted = []
   try {
@@ -90,24 +91,20 @@ stock rules: if the source row has a stock/qty/available/inventory column with a
 Category rules: meat=pork/beef/chicken/poultry, seafood=fish/shrimp/squid, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices, beverages=drinks/juice/water, packaging=boxes/bags/containers.
 Supplier: ${supplierName}
 ---
-${text.slice(0, 2000)}
+${text.slice(0, 4000)}
 ---
 JSON:`
 
-    const aiRes = await httpsPost(
-      'api.groq.com',
-      '/openai/v1/chat/completions',
-      { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` },
-      { model: 'llama-3.1-8b-instant',
-        messages: [
-          { role: 'system', content: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.' },
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.0, max_tokens: 1500 }
-    )
-    if (!aiRes.ok) throw new Error(aiRes.body?.error?.message || `Groq returned ${aiRes.status}`)
-    const content = aiRes.body.choices?.[0]?.message?.content?.trim()
-    if (!content) throw new Error('Empty response from Groq')
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+    const aiMsg = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 2000,
+      temperature: 0,
+      system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
+      messages: [{ role: 'user', content: prompt }]
+    })
+    const content = aiMsg.content?.[0]?.text?.trim()
+    if (!content) throw new Error('Empty response from Anthropic')
 
     const jsonMatch = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/) || content.match(/(\[[\s\S]*\])/)
     if (!jsonMatch) throw new Error('No JSON array returned by AI. Got: ' + content.slice(0, 200))
