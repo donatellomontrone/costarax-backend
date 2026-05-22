@@ -72,8 +72,13 @@ async function handlePriceList(req, res) {
   }
 
   let supplierId = null, supplierName = 'Supplier'
+  // .maybeSingle() + NOT NULL filter: a user may belong to both a business and
+  // a supplier (multi-role testing accounts). .single() then returns no rows.
   const { data: org } = await supabaseAdmin
-    .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+    .from('organization_members').select('supplier_id')
+    .eq('user_id', auth.user.id)
+    .not('supplier_id', 'is', null)
+    .limit(1).maybeSingle()
   supplierId = org?.supplier_id || null
   if (!supplierId && auth.profile.role !== 'admin') {
     return res.status(403).json({ error: 'No supplier linked to this account' })
@@ -286,8 +291,10 @@ async function handleSupplierLogo(req, res) {
   if (!supplierId) return res.status(400).json({ error: 'supplier_id is required' })
 
   if (auth.profile.role !== 'admin') {
-    const { data: member } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
-    if (!member || member.supplier_id !== supplierId) return res.status(403).json({ error: 'You can only upload a logo for your own supplier' })
+    const { data: members } = await supabaseAdmin.from('organization_members')
+      .select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null)
+    const ownsSupplier = (members || []).some(m => m.supplier_id === supplierId)
+    if (!ownsSupplier) return res.status(403).json({ error: 'You can only upload a logo for your own supplier' })
   }
 
   const file = (Array.isArray(files.file) ? files.file : [files.file].filter(Boolean))[0]
