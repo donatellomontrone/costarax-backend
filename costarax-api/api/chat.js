@@ -162,6 +162,24 @@ async function handleSupportMode(req, res, body) {
   }
 
   if (action === 'start') {
+    const ctxForActions = await resolveCtx();
+    const quickActionsFor = (role) => role === 'supplier'
+      ? [
+          { label: '📤 Upload my price list',     prompt: 'How do I upload my price list?' },
+          { label: '💬 Reply to a quote request', prompt: 'How do I reply to a quote request?' },
+          { label: '📦 Update stock on a product', prompt: 'How do I update the stock for one of my products?' },
+          { label: '📊 See my analytics',         prompt: 'How do I see my sales analytics?' },
+          { label: '👤 Talk to a human',          prompt: 'I want to talk to a human.', escalate: true },
+        ]
+      : [
+          { label: '🔍 Compare prices for a product', prompt: 'How do I compare prices across suppliers for a product?' },
+          { label: '📝 Send a quote request (RFQ)',   prompt: 'How do I send a quote request to suppliers?' },
+          { label: '📋 Track my orders',              prompt: 'Where do I track my open quotes and orders?' },
+          { label: '⭐ Use my watchlist',              prompt: 'How does the watchlist work?' },
+          { label: '💰 Set a monthly budget',         prompt: 'How do I set a budget for a category?' },
+          { label: '👤 Talk to a human',              prompt: 'I want to talk to a human.', escalate: true },
+        ];
+
     // Find an existing open chat for this user; if none, create one.
     const { data: existing } = await supabaseAdmin
       .from('support_chats')
@@ -171,8 +189,19 @@ async function handleSupportMode(req, res, body) {
       .order('last_message_at', { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (existing) return res.status(200).json({ chat: existing });
-    const ctx = await resolveCtx();
+    if (existing) {
+      // Decide whether to show quick actions for a returning chat: only when
+      // the user hasn't typed anything yet (only the AI greeting exists).
+      const { count: userMsgs } = await supabaseAdmin
+        .from('support_messages').select('id', { count: 'exact', head: true })
+        .eq('chat_id', existing.id).eq('sender', 'user');
+      const includeActions = (userMsgs || 0) === 0;
+      return res.status(200).json({
+        chat: existing,
+        quick_actions: includeActions ? quickActionsFor(ctxForActions.role) : []
+      });
+    }
+    const ctx = ctxForActions;
     const { data: created, error } = await supabaseAdmin
       .from('support_chats')
       .insert({ user_id: user.id, user_role: ctx.role })
@@ -182,13 +211,14 @@ async function handleSupportMode(req, res, body) {
     // Personalised opening greeting.
     const name = (ctx.businessName || ctx.supplierName || '').trim();
     const firstName = name ? name.split(/\s+/)[0] : '';
+    const orgLabel  = name ? ` from ${name}` : '';
     const greeting = ctx.role === 'supplier'
-      ? `Hi${firstName ? ` ${firstName}` : ''}! I can help with your catalog, quote requests, analytics or anything Costarax-related. What do you need?`
-      : `Hi${firstName ? ` ${firstName}` : ''}! I can help with finding suppliers, comparing prices, RFQs or your account. What can I help with today?`;
+      ? `Hi${firstName ? ` ${firstName}` : ''}! I'm here to help${orgLabel} with your catalog, quote requests, analytics or anything Costarax-related. Pick a topic below or just type your question.`
+      : `Hi${firstName ? ` ${firstName}` : ''}! I'm here to help${orgLabel} with finding suppliers, comparing prices, RFQs or your account. Pick a topic below or just type your question.`;
     await supabaseAdmin.from('support_messages').insert({
       chat_id: created.id, sender: 'ai', body: greeting
     });
-    return res.status(200).json({ chat: created });
+    return res.status(200).json({ chat: created, quick_actions: quickActionsFor(ctx.role), greeting });
   }
 
   if (action === 'fetch') {
