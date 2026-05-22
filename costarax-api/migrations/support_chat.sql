@@ -68,3 +68,11 @@ GRANT SELECT, INSERT, UPDATE ON public.support_chats TO authenticated;
 GRANT SELECT, INSERT ON public.support_messages TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE public.support_chats_id_seq    TO authenticated;
 GRANT USAGE, SELECT ON SEQUENCE public.support_messages_id_seq TO authenticated;
+
+-- The backend uses the service_role key (supabaseAdmin) which bypasses RLS
+-- but still needs the table-level GRANT, otherwise PostgREST/Postgres
+-- returns 'permission denied for table'.
+GRANT ALL ON public.support_chats    TO service_role;
+GRANT ALL ON public.support_messages TO service_role;
+GRANT ALL ON SEQUENCE public.support_chats_id_seq    TO service_role;
+GRANT ALL ON SEQUENCE public.support_messages_id_seq TO service_role;
