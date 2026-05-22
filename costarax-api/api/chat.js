@@ -78,7 +78,12 @@ Useful tips you can give suppliers:
   return `You are the Costarax in-app support assistant — helpful, concise, direct.
 
 CONTEXT: ${greeting}
-DO NOT ask whether they are a buyer or a supplier — you already know. Tailor your reply to their role.
+
+CRITICAL RULES — never break these:
+- You ALREADY KNOW the user's role (${role}). Treat that as ground truth.
+- NEVER ask "are you a buyer or supplier?", "are you a supplier wanting to…", "if you're a buyer…" or any branching question about which side of the marketplace they're on. That question is forbidden.
+- NEVER list both supplier-side and buyer-side answers in the same reply. Give only the answer for a ${role}.
+- If the user's question is ambiguous, default to the ${role} interpretation. Only ask for clarification on specifics (which product? which quote?), never on who they are.
 
 ABOUT COSTARAX: A private B2B procurement intelligence platform for foodservice businesses in the Philippines. Connects buyers (restaurants, hotels, canteens) with verified suppliers. 380+ suppliers, 12,000+ AI-indexed products. Prices in ₱. UI in English / Filipino / Chinese.
 
@@ -118,21 +123,34 @@ async function handleSupportMode(req, res, body) {
   const userRole = profile?.role || 'buyer';
   const isAdmin  = ['admin','super_admin'].includes(userRole);
 
-  // Resolve a display name + simple ctx for the AI prompt.
+  // Resolve role + display name. The frontend passes `active_role` from the
+  // current URL (?role=supplier/business), which is the truth for the AI —
+  // a user can hold both memberships, and they might be using the buyer UI
+  // even though their primary profile is supplier (or vice-versa).
   async function resolveCtx() {
-    const ctx = { role: userRole === 'buyer' ? 'buyer' : userRole === 'supplier' ? 'supplier' : 'admin' };
+    const hinted = body.active_role;
+    const role =
+      hinted === 'supplier' ? 'supplier' :
+      hinted === 'buyer' || hinted === 'business' ? 'buyer' :
+      isAdmin ? 'admin' :
+      userRole === 'supplier' ? 'supplier' : 'buyer';
+    const ctx = { role };
     try {
-      if (ctx.role === 'buyer') {
+      if (role === 'buyer') {
         const { data: m } = await supabaseAdmin
-          .from('organization_members').select('business_id').eq('user_id', user.id).maybeSingle();
+          .from('organization_members').select('business_id')
+          .eq('user_id', user.id).not('business_id', 'is', null)
+          .limit(1).maybeSingle();
         if (m?.business_id) {
           const { data: b } = await supabaseAdmin
             .from('businesses').select('name').eq('id', m.business_id).maybeSingle();
           if (b?.name) ctx.businessName = b.name;
         }
-      } else if (ctx.role === 'supplier') {
+      } else if (role === 'supplier') {
         const { data: m } = await supabaseAdmin
-          .from('organization_members').select('supplier_id').eq('user_id', user.id).maybeSingle();
+          .from('organization_members').select('supplier_id')
+          .eq('user_id', user.id).not('supplier_id', 'is', null)
+          .limit(1).maybeSingle();
         if (m?.supplier_id) {
           const { data: s } = await supabaseAdmin
             .from('suppliers').select('name').eq('id', m.supplier_id).maybeSingle();
