@@ -213,6 +213,45 @@ Supplier: ${supplierName}`
     }
   }
 
+  // ── Price anomaly detection ─────────────────────────────────────────────
+  // Compare each new row's price against the median of OTHER suppliers' active
+  // prices for the same product (matching unit when possible). Flag if the new
+  // price is < 1/3 or > 3x the market median — almost always a unit mistake
+  // (e.g. "kg" vs "50kg sack") or an OCR misread.
+  const anomalies = []
+  if (priceRows.length) {
+    const productIds = priceRows.map(r => r.product_id)
+    const { data: marketPrices } = await supabaseAdmin
+      .from('supplier_prices')
+      .select('product_id, price_php, unit, supplier_id')
+      .in('product_id', productIds)
+      .eq('active', true)
+      .neq('supplier_id', supplierId || '')
+    const byProduct = {}
+    ;(marketPrices || []).forEach(mp => {
+      if (!byProduct[mp.product_id]) byProduct[mp.product_id] = []
+      byProduct[mp.product_id].push(mp)
+    })
+    const median = (arr) => {
+      const s = [...arr].sort((a, b) => a - b)
+      const mid = Math.floor(s.length / 2)
+      return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+    }
+    priceRows.forEach(r => {
+      const others = (byProduct[r.product_id] || []).filter(mp => mp.unit === r.unit).map(mp => Number(mp.price_php))
+      if (others.length < 2) return
+      const med = median(others)
+      if (!med) return
+      const ratio = r.price_php / med
+      if (ratio < 0.33 || ratio > 3) {
+        anomalies.push({
+          product_id: r.product_id, price: r.price_php, unit: r.unit,
+          market_median: med, sample_size: others.length, ratio: Number(ratio.toFixed(2))
+        })
+      }
+    })
+  }
+
   if (priceRows.length && supplierId) {
     const productIds = priceRows.map(r => r.product_id)
     await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId).in('product_id', productIds)
@@ -223,14 +262,18 @@ Supplier: ${supplierName}`
   const matched = priceRows.length
   if (uploadId) {
     await supabaseAdmin.from('price_list_uploads').update({
-      status: 'needs_review', ai_summary: JSON.stringify({ extracted: extracted.length, matched, created, error: upsertError || insertError || null })
+      status: anomalies.length ? 'needs_review' : 'needs_review',
+      ai_summary: JSON.stringify({ extracted: extracted.length, matched, created, anomalies: anomalies.length, anomaly_details: anomalies.slice(0, 5), error: upsertError || insertError || null })
     }).eq('id', uploadId)
   }
 
+  const anomalyMsg = anomalies.length
+    ? ` ⚠ ${anomalies.length} price anomal${anomalies.length === 1 ? 'y' : 'ies'} flagged for review.`
+    : ''
   return res.status(201).json({
-    message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed (${created} new added to catalog).`,
+    message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed (${created} new added to catalog).${anomalyMsg}`,
     extracted: extracted.length, validItems: validItems.length, toCreate: toCreate.length, matched, created,
-    insertError, upsertError, sampleExtracted: extracted.slice(0, 2)
+    insertError, upsertError, anomalies, sampleExtracted: extracted.slice(0, 2)
   })
 }
 
