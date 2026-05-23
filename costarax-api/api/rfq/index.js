@@ -41,7 +41,7 @@ module.exports = async (req, res) => {
     if (biz) { buyerBusinessId = biz.id; buyerName = biz.name }
     else {
       const { data: org } = await supabaseAdmin
-        .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
       if (org?.business_id) {
         buyerBusinessId = org.business_id
         const { data: b } = await supabaseAdmin.from('businesses').select('name').eq('id', org.business_id).single()

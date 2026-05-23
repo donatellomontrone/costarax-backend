@@ -33,7 +33,7 @@ module.exports = async (req, res) => {
 
       if (!biz) {
         const { data: org } = await supabaseAdmin
-          .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+          .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
         if (!org) return res.status(200).json([])
         ;({ data, error } = await fetchBuyerQuotes(org.business_id))
       } else {
@@ -89,7 +89,7 @@ module.exports = async (req, res) => {
       buyerName = biz.name
     } else {
       const { data: org } = await supabaseAdmin
-        .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
       if (org?.business_id) {
         buyerBusinessId = org.business_id
         const { data: b } = await supabaseAdmin.from('businesses').select('name').eq('id', org.business_id).single()
@@ -108,7 +108,7 @@ module.exports = async (req, res) => {
 
     try {
       const { data: supplier } = await supabaseAdmin.from('suppliers').select('name,contact_phone').eq('id', supplier_id).single()
-      const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', supplier_id).single()
+      const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', supplier_id).limit(1).maybeSingle()
       if (supplierMember?.user_id) {
         const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).single()
         if (sp?.email) {

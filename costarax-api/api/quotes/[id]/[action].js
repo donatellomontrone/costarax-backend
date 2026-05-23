@@ -24,7 +24,7 @@ module.exports = async (req, res) => {
         .from('businesses').select('id').eq('contact_email', auth.user.email).single()
       if (biz) { buyerBusinessId = biz.id } else {
         const { data: org } = await supabaseAdmin
-          .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+          .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
         buyerBusinessId = org?.business_id || null
       }
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
@@ -77,9 +77,9 @@ module.exports = async (req, res) => {
 
     if (auth.profile.role !== 'admin') {
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
-        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
         buyerBusinessId = org?.business_id || null
       }
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
@@ -123,7 +123,7 @@ module.exports = async (req, res) => {
     if (updateErr) return res.status(500).json({ error: updateErr.message, droppedColumns: droppedCols })
 
     try {
-      const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).single()
+      const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).limit(1).maybeSingle()
       if (supplierMember?.user_id) {
         const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).single()
         if (sp?.email) {
@@ -184,9 +184,9 @@ module.exports = async (req, res) => {
 
     if (auth.profile.role !== 'admin') {
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
-        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
         buyerBusinessId = org?.business_id || null
       }
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
@@ -277,9 +277,9 @@ module.exports = async (req, res) => {
 
     if (auth.profile.role !== 'admin') {
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
-        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
         buyerBusinessId = org?.business_id || null
       }
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
@@ -292,7 +292,7 @@ module.exports = async (req, res) => {
     if (error) return res.status(500).json({ error: error.message })
 
     try {
-      const { data: member } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).single()
+      const { data: member } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).limit(1).maybeSingle()
       if (member?.user_id) {
         const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', member.user_id).single()
         if (sp?.email) {
@@ -317,9 +317,9 @@ module.exports = async (req, res) => {
         .from('quote_requests').select('buyer_business_id').eq('id', id).single()
       if (!quote) return res.status(404).json({ error: 'Quote not found' })
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
-        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
         buyerBusinessId = org?.business_id || null
       }
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })

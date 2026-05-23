@@ -15,7 +15,7 @@ async function getCallerQuoteAccess(auth, quoteId) {
     let bid = biz?.id
     if (!bid) {
       const { data: org } = await supabaseAdmin
-        .from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
       bid = org?.business_id
     }
     return { quote, allowed: !!bid && bid === quote.buyer_business_id }

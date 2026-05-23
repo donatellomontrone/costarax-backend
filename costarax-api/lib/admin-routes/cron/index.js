@@ -87,7 +87,7 @@ module.exports = async (req, res) => {
       // Email supplier
       try {
         const { data: member } = await supabaseAdmin
-          .from('organization_members').select('user_id').eq('supplier_id', q.supplier_id).single()
+          .from('organization_members').select('user_id').eq('supplier_id', q.supplier_id).limit(1).maybeSingle()
         if (member?.user_id) {
           const { data: profile } = await supabaseAdmin
             .from('profiles').select('email').eq('id', member.user_id).single()
@@ -131,7 +131,7 @@ module.exports = async (req, res) => {
       // Email supplier
       try {
         const { data: member } = await supabaseAdmin
-          .from('organization_members').select('user_id').eq('supplier_id', q.supplier_id).single()
+          .from('organization_members').select('user_id').eq('supplier_id', q.supplier_id).limit(1).maybeSingle()
         if (member?.user_id) {
           const { data: profile } = await supabaseAdmin
             .from('profiles').select('email').eq('id', member.user_id).single()

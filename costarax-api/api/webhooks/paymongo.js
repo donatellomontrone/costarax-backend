@@ -85,7 +85,7 @@ module.exports = async (req, res) => {
 
       // Notify supplier
       const { data: org } = await supabaseAdmin
-        .from('organization_members').select('profiles(email)').eq('supplier_id', sub.supplier_id).single()
+        .from('organization_members').select('profiles(email)').eq('supplier_id', sub.supplier_id).limit(1).maybeSingle()
       const email = org?.profiles?.email
       if (email) {
         await sendEmail({
