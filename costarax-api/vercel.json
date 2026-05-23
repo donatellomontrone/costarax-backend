@@ -11,5 +11,15 @@
       "maxDuration": 60
     }
   },
+  "rewrites": [
+    {
+      "source": "/api/admin/:seg1/:seg2/:seg3",
+      "destination": "/api/admin/:seg1?_id=:seg2&_action=:seg3"
+    },
+    {
+      "source": "/api/admin/:seg1/:seg2",
+      "destination": "/api/admin/:seg1?_id=:seg2"
+    }
+  ],
   "headers": []
 }

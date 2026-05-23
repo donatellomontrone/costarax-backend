@@ -14,16 +14,28 @@ module.exports = async (req, res) => {
     if (error) return res.status(500).json({ error: error.message })
 
     const ids = (sups || []).map(s => s.id)
-    let subs = []
+    let subs = [], orgMembers = []
     if (ids.length > 0) {
-      const r = await supabaseAdmin
-        .from('subscriptions')
-        .select('supplier_id, status, current_period_end, last_payment_at, last_payment_status, cancel_at_period_end, created_at')
-        .in('supplier_id', ids)
-      subs = r.data || []
+      const [subsRes, membersRes] = await Promise.all([
+        supabaseAdmin
+          .from('subscriptions')
+          .select('supplier_id, status, current_period_end, last_payment_at, last_payment_status, cancel_at_period_end, created_at')
+          .in('supplier_id', ids),
+        supabaseAdmin
+          .from('organization_members')
+          .select('supplier_id, user_id, profiles(email)')
+          .in('supplier_id', ids),
+      ])
+      subs = subsRes.data || []
+      orgMembers = membersRes.data || []
     }
     const subBy = {}
     subs.forEach(s => { subBy[s.supplier_id] = s })
+    const membersBySup = {}
+    orgMembers.forEach(m => {
+      if (!membersBySup[m.supplier_id]) membersBySup[m.supplier_id] = []
+      membersBySup[m.supplier_id].push({ user_id: m.user_id, email: m.profiles?.email || null })
+    })
 
     const now = new Date()
     const toAutoPauseSub   = []    // expired paid subscriptions
@@ -45,7 +57,8 @@ module.exports = async (req, res) => {
         cancel_at_period_end: sub?.cancel_at_period_end || false,
         membership_started_at: sub?.created_at || s.created_at || null,
         expired: subExpired,
-        trial_expired: trialExpired
+        trial_expired: trialExpired,
+        linked_users: membersBySup[s.id] || [],
       }
     })
 
