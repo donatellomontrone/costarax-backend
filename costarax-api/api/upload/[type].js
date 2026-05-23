@@ -159,6 +159,7 @@ Supplier: ${supplierName}`
       }
     }
   } catch (e) {
+    console.error('[price-list upload] AI extraction error:', e.message, e.status, e.error)
     if (uploadId) {
       await supabaseAdmin.from('price_list_uploads').update({ status: 'rejected', ai_summary: JSON.stringify({ error: e.message }) }).eq('id', uploadId)
     }
