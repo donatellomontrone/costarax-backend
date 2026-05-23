@@ -31,6 +31,7 @@ module.exports = async (req, res) => {
       role:            profileMap[u.id]?.role || '—',
       created_at:      u.created_at,
       last_sign_in_at: u.last_sign_in_at || null,
+      supplier_id:     orgMap[u.id]?.supplier_id || null,
       supplier_name:   orgMap[u.id]?.suppliers?.name || null,
       business_name:   orgMap[u.id]?.businesses?.name || null,
     })).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
@@ -98,6 +99,18 @@ module.exports = async (req, res) => {
   // ── POST — create user OR send password reset email ──────────────────────
   if (req.method === 'POST') {
     const { id, email, action, password, role, supplier_id } = req.body || {}
+
+    // Link (or unlink) a user to a supplier organisation
+    if (action === 'link_supplier') {
+      if (!id) return res.status(400).json({ error: 'User id is required' })
+      // Remove any existing supplier link for this user
+      await supabaseAdmin.from('organization_members').delete().eq('user_id', id).not('supplier_id', 'is', null)
+      if (supplier_id) {
+        const { error: omErr } = await supabaseAdmin.from('organization_members').insert({ user_id: id, supplier_id })
+        if (omErr) return res.status(500).json({ error: omErr.message })
+      }
+      return res.status(200).json({ message: supplier_id ? 'Supplier linked' : 'Supplier unlinked' })
+    }
 
     // Create a new user
     if (action === 'create') {
