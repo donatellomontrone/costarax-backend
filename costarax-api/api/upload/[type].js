@@ -139,9 +139,88 @@ Supplier: ${supplierName}`
             error: 'Could not extract text from this PDF. It may be a scanned image. Please take a screenshot and upload as a JPG/PNG instead.'
           })
         }
-        // Truncate to ~8000 chars — enough for a large price list while keeping
-        // the prompt well within Haiku's context window.
-        userContent = `${ruleBlock}\n---\n${pdfText.slice(0, 8000)}\n---\nJSON:`
+        // For large price lists, split into parallel chunks so we can handle
+        // 500-1000 products within the Vercel Hobby 10-second timeout.
+        // Each chunk is ~6000 chars → ~150-200 products per AI call.
+        // Up to 6 parallel calls → ~900-1200 products total.
+        const CHUNK = 6000
+        if (pdfText.length > CHUNK) {
+          const chunks = []
+          for (let i = 0; i < pdfText.length && chunks.length < 6; i += CHUNK) {
+            chunks.push(pdfText.slice(i, i + CHUNK))
+          }
+          const anthropicInner = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+          const results = await Promise.all(chunks.map(chunk =>
+            anthropicInner.messages.create({
+              model,
+              max_tokens: 4000,
+              temperature: 0,
+              system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
+              messages: [{ role: 'user', content: `${ruleBlock}\n---\n${chunk}\n---\nJSON:` }]
+            }).then(r => r.content?.[0]?.text?.trim() || '').catch(() => '')
+          ))
+          // Merge all chunk results
+          const allItems = []
+          for (const chunkContent of results) {
+            if (!chunkContent) continue
+            const m = chunkContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || chunkContent.match(/(\[[\s\S]*)/)
+            let raw = m ? (m[1] || m[0]).trim() : chunkContent.trim()
+            if (!raw.startsWith('[')) raw = '[' + raw
+            if (!raw.trimEnd().endsWith(']')) {
+              const last = raw.lastIndexOf('},')
+              raw = (last > 0 ? raw.slice(0, last + 1) : raw) + ']'
+            }
+            try { const items = JSON.parse(raw); allItems.push(...items) } catch (_) {}
+          }
+          // Deduplicate by name (same product may appear in adjacent chunks)
+          const seen = new Set()
+          extracted = allItems.filter(i => {
+            if (!i?.name || seen.has(i.name.toLowerCase())) return false
+            seen.add(i.name.toLowerCase()); return true
+          }).filter(i => i.price > 0)
+          // Skip the normal single-call path below
+          if (!extracted.length) throw new Error('No products could be extracted from the PDF text.')
+          // Jump straight to DB upsert — bypass the single-call code
+          const catalog2 = await supabaseAdmin.from('products').select('id, canonical_name').eq('active', true)
+          const products2 = catalog2.data || []
+          function normalize2(s) { return (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim() }
+          function matchProduct2(canonical) {
+            const needle = normalize2(canonical)
+            return products2.find(p => {
+              const hay = normalize2(p.canonical_name)
+              if (hay === needle) return true
+              const nt = needle.split(' '), ht = hay.split(' ')
+              const shared = nt.filter(t => t.length > 2 && ht.includes(t)).length
+              return shared >= Math.ceil(nt.length * 0.6)
+            }) || null
+          }
+          const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
+          const validItems2 = extracted.filter(i => i.name && i.price && i.price > 0)
+          const toCreate2 = [], priceRows2 = []
+          const parseStock2 = (v) => { if (v===null||v===undefined||v==='') return null; const n=Number(v); return Number.isFinite(n)&&n>=0?n:null }
+          for (const item of validItems2) {
+            const canonicalName = (item.canonical||item.name).trim()
+            const category_id = VALID_CATS.includes(item.category) ? item.category : 'dry'
+            const product = matchProduct2(canonicalName)
+            const unit = (item.unit||'kg').trim()
+            const stock_qty = parseStock2(item.stock)
+            if (product) priceRows2.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
+            else toCreate2.push({ canonical_name: canonicalName, category_id, default_unit: unit, active: true, _price: parseFloat(item.price), _unit: unit, _stock: stock_qty })
+          }
+          if (toCreate2.length) {
+            const { data: newP } = await supabaseAdmin.from('products').insert(toCreate2.map(({_price,_unit,_stock,...p})=>p)).select('id,canonical_name')
+            if (newP) newP.forEach((np,i) => priceRows2.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate2[i]._price, stock_qty: toCreate2[i]._stock, unit: toCreate2[i]._unit, active: true, updated_at: new Date().toISOString() }))
+          }
+          if (priceRows2.length && supplierId) {
+            await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId).in('product_id', priceRows2.map(r=>r.product_id))
+            await supabaseAdmin.from('supplier_prices').insert(priceRows2)
+          }
+          const matched2 = priceRows2.length
+          if (uploadId) await supabaseAdmin.from('price_list_uploads').update({ status: 'needs_review', ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length }) }).eq('id', uploadId)
+          return res.status(201).json({ message: `Done! ${matched2} product${matched2!==1?'s':''} indexed (${toCreate2.length} new added to catalog).`, extracted: extracted.length, matched: matched2, created: toCreate2.length, anomalies: [] })
+        }
+        // Single-chunk path for smaller PDFs
+        userContent = `${ruleBlock}\n---\n${pdfText.slice(0, CHUNK)}\n---\nJSON:`
       } else {
         // Images: send as vision block (Haiku supports image vision natively)
         userContent = [
