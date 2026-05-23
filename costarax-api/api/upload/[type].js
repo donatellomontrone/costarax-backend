@@ -139,35 +139,61 @@ Supplier: ${supplierName}`
             error: 'Could not extract text from this PDF. It may be a scanned image. Please take a screenshot and upload as a JPG/PNG instead.'
           })
         }
-        // Strip repeating page headers (phone lines, "Page N" markers, fax/email
-        // header rows that pdf-parse inserts at the start of every page).
-        // Each page header wastes ~100-200 chars of our token budget. Stripping
-        // them recovers space for actual product rows, especially on 20+ page PDFs.
-        pdfText = pdfText
-          .replace(/^\+63[\d\s\/\.\-\(\)]+.*$/mg, '')  // phone/fax lines starting with +63
-          .replace(/^Page\s+\d+\s*$/mg, '')             // "Page N" standalone lines
-          .replace(/^Fax[\s:]+[\d\s\/\+\-]+$/mg, '')   // "Fax: ..." lines
-          .replace(/\n{3,}/g, '\n\n')                   // collapse excessive blank lines
-          .trim()
-        // For large price lists, split into parallel chunks so we can handle
-        // 500-1000 products within the Vercel Hobby 10-second timeout.
-        // Each chunk is ~6000 chars → ~150-200 products per AI call.
-        // Up to 10 parallel calls → covers ~60,000 chars (enough for any real PDF).
-        const CHUNK = 6000
-        if (pdfText.length > CHUNK) {
+        // ── Pre-process: extract only lines containing a price ──────────────
+        // Raw pdf-parse output is ~60% noise: page headers, column headers,
+        // section titles, blank lines. Each 6000-char raw chunk contains only
+        // 56–90 product lines mixed with equal noise, and Haiku wastes its
+        // max_tokens budget on that noise, yielding just 9–11 products per call.
+        // By pre-filtering to price-bearing lines only, each chunk becomes
+        // densely packed with products → 70 products per chunk, ~9 chunks total.
+        const PRICE_LINE_RX = /\d[\d,]*\.\d{2}\/\w/
+        const PAGE_HDR_RX   = /\+63|@|phone:|fax:|email:|Parañaque|Manila|Philippines/i
+        const COL_HDR_RX    = /^Product Description[\s\t]+(Specs|Marble|Grade|Origin|Brand)/i
+        const SECTION_RX    = /^[A-Z][A-Z\s\-\/&"]+[A-Z]\s*$/  // ALL-CAPS section headers
+        const rawLines = pdfText.split('\n').map(l => l.trim())
+        let curSection = '', curSubgroup = ''
+        const productLines = []
+        for (const line of rawLines) {
+          if (!line || PAGE_HDR_RX.test(line) || COL_HDR_RX.test(line)) continue
+          if (SECTION_RX.test(line) && line.length < 70) { curSection = line; curSubgroup = ''; continue }
+          if (PRICE_LINE_RX.test(line)) {
+            // Prefix with section + sub-group context so AI can form proper canonical names
+            const prefix = [curSection, curSubgroup].filter(Boolean).join(' > ')
+            productLines.push(prefix ? `${prefix} | ${line}` : line)
+            curSubgroup = '' // reset after attaching to this product
+          } else if (line.length > 2 && line.length < 70) {
+            curSubgroup = line  // likely a grade/breed sub-header (e.g. "F1 Wagyu", "Angus")
+          }
+        }
+        console.log('[price-list upload] pre-extracted', productLines.length, 'product lines (PDF was', pdfText.length, 'chars)')
+
+        // Chunk by product lines: 70 per chunk × max 10 chunks = 700 products.
+        // All chunks run in parallel; Haiku handles 70 clean lines well within
+        // 4000 tokens of output and 3–4 s latency.
+        const LINES_PER_CHUNK = 70
+        if (productLines.length > 0) {
           const chunks = []
-          for (let i = 0; i < pdfText.length && chunks.length < 10; i += CHUNK) {
-            chunks.push(pdfText.slice(i, i + CHUNK))
+          for (let i = 0; i < productLines.length && chunks.length < 10; i += LINES_PER_CHUNK) {
+            chunks.push(productLines.slice(i, i + LINES_PER_CHUNK).join('\n'))
           }
           const anthropicInner = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-          const results = await Promise.all(chunks.map(chunk =>
+          // Simplified prompt for clean pre-processed input:
+          // each line is already "SECTION > Sub-group | Name Specs Brand Price/unit"
+          const chunkRule = `${ruleBlock}
+Format: each line is one product. Lines may be prefixed with "SECTION > Sub-group | " context.
+Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").`
+          const results = await Promise.all(chunks.map((chunk, idx) =>
             anthropicInner.messages.create({
               model,
-              max_tokens: 4000,
+              max_tokens: 6000,
               temperature: 0,
               system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
-              messages: [{ role: 'user', content: `${ruleBlock}\n---\n${chunk}\n---\nJSON:` }]
-            }).then(r => r.content?.[0]?.text?.trim() || '').catch(() => '')
+              messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
+            }).then(r => {
+              const text = r.content?.[0]?.text?.trim() || ''
+              console.log(`[price-list chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length}`)
+              return text
+            }).catch(e => { console.error(`[price-list chunk ${idx}] FAILED:`, e.message); return '' })
           ))
           // Merge all chunk results
           const allItems = []
@@ -182,12 +208,20 @@ Supplier: ${supplierName}`
             }
             try { const items = JSON.parse(raw); allItems.push(...items) } catch (_) {}
           }
-          // Deduplicate by name (same product may appear in adjacent chunks)
+          console.log('[price-list upload] total items before dedup:', allItems.length)
+          // Deduplicate by CANONICAL name (not original name).
+          // Many products share the same base cut name ("Tenderloin", "Chuck Roll")
+          // but are distinct entries because they differ in brand/grade/origin.
+          // Using the canonical (which includes brand/grade) preserves all unique products
+          // while still removing genuine duplicates from chunk-boundary overlap.
           const seen = new Set()
           extracted = allItems.filter(i => {
-            if (!i?.name || seen.has(i.name.toLowerCase())) return false
-            seen.add(i.name.toLowerCase()); return true
+            if (!i?.name) return false
+            const key = (i.canonical || i.name).toLowerCase().trim()
+            if (seen.has(key)) return false
+            seen.add(key); return true
           }).filter(i => i.price > 0)
+          console.log('[price-list upload] extracted after dedup+filter:', extracted.length)
           // Skip the normal single-call path below
           if (!extracted.length) throw new Error('No products could be extracted from the PDF text.')
           // Jump straight to DB upsert — bypass the single-call code
@@ -229,8 +263,9 @@ Supplier: ${supplierName}`
           if (uploadId) await supabaseAdmin.from('price_list_uploads').update({ status: 'needs_review', ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length }) }).eq('id', uploadId)
           return res.status(201).json({ message: `Done! ${matched2} product${matched2!==1?'s':''} indexed (${toCreate2.length} new added to catalog).`, extracted: extracted.length, matched: matched2, created: toCreate2.length, anomalies: [] })
         }
-        // Single-chunk path for smaller PDFs
-        userContent = `${ruleBlock}\n---\n${pdfText.slice(0, CHUNK)}\n---\nJSON:`
+        // Fallback: PDF had no recognisable price lines (unusual format).
+        // Send first 6000 chars of raw text as a best-effort single call.
+        userContent = `${ruleBlock}\n---\n${pdfText.slice(0, 6000)}\n---\nJSON:`
       } else {
         // Images: send as vision block (Haiku supports image vision natively)
         userContent = [
