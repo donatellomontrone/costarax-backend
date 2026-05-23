@@ -6,8 +6,6 @@ const paymentsIndex = require('../../lib/admin-routes/payments')
 const usersIndex = require('../../lib/admin-routes/users')
 const cronIndex = require('../../lib/admin-routes/cron')
 const { applyCors } = require('../../lib/cors')
-const { supabaseAdmin } = require('../../lib/supabase-admin')
-
 module.exports = async (req, res) => {
   if (applyCors(req, res, { methods: 'GET,POST,PATCH,DELETE,OPTIONS' })) return
 
@@ -57,27 +55,6 @@ module.exports = async (req, res) => {
 
   if (resource === 'cron') {
     return cronIndex(req, res)
-  }
-
-  // ── TEMPORARY one-shot fixer — remove after use ──────────────────────────
-  if (resource === '_fix' && req.query.secret === 'cx-fix-2024-ok') {
-    const email = req.query.email || 'moderna.bgc@gmail.com'
-    const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
-    if (authErr) return res.status(500).json({ step: 'listUsers', error: authErr.message })
-    const user = (authData?.users || []).find(u => u.email?.toLowerCase() === email.toLowerCase())
-    if (!user) return res.status(404).json({ error: 'User not found: ' + email })
-    const { data: suppliers } = await supabaseAdmin.from('suppliers').select('id,name,status,active').ilike('name', req.query.supplier || '%high tower%')
-    if (!suppliers?.length) return res.status(404).json({ error: 'Supplier not found' })
-    const supplier = suppliers[0]
-    const { data: existing } = await supabaseAdmin.from('organization_members').select('user_id,supplier_id').eq('user_id', user.id)
-    await supabaseAdmin.from('organization_members').delete().eq('user_id', user.id).not('supplier_id', 'is', null)
-    const { error: insErr } = await supabaseAdmin.from('organization_members').insert({ user_id: user.id, supplier_id: supplier.id })
-    if (insErr) return res.status(500).json({ step: 'insert', error: insErr.message })
-    await supabaseAdmin.from('profiles').upsert({ id: user.id, email: user.email, role: 'supplier' }, { onConflict: 'id' })
-    // Also activate the supplier if it's rejected/inactive
-    const { error: activateErr } = await supabaseAdmin.from('suppliers')
-      .update({ active: true, status: 'approved' }).eq('id', supplier.id)
-    return res.status(200).json({ ok: true, user: { id: user.id, email: user.email }, supplier, was: existing, activated: !activateErr, activateErr: activateErr?.message })
   }
 
   return res.status(404).json({ error: 'Admin route not found' })
