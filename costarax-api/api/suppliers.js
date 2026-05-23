@@ -93,7 +93,30 @@ module.exports = async (req, res) => {
     const user = await verifyToken(token)
     if (!user) return res.status(401).json({ error: 'Unauthorized' })
 
-    // ── 1) Suppliers (active + approved) ─────────────────────────────────
+    // ── 1) Supplier self lookup (own record regardless of approval state) ─
+    if (req.query?.mine === '1') {
+      const { data: orgMember } = await supabaseAdmin
+        .from('organization_members')
+        .select('supplier_id')
+        .eq('user_id', user.id)
+        .not('supplier_id', 'is', null)
+        .limit(1)
+        .maybeSingle()
+
+      if (!orgMember?.supplier_id) return res.status(404).json({ error: 'No supplier linked to this user' })
+
+      const { data: supplier, error: ownErr } = await supabaseAdmin
+        .from('suppliers')
+        .select('id,name,category,categories,tagline,city,region,minimum_order_php,rating,review_count,verified,active,vat_registered,payment_terms,credit_terms,plan,contact_name,contact_phone,contact_email,delivery_days,lead_time_days,cold_chain,years_in_business,price_validity_days,sample_available,delivery_areas,description,certifications,logo_url,status')
+        .eq('id', orgMember.supplier_id)
+        .maybeSingle()
+
+      if (ownErr) return res.status(500).json({ error: ownErr.message })
+      if (!supplier) return res.status(404).json({ error: 'Supplier record not found' })
+      return res.status(200).json(supplier)
+    }
+
+    // ── 2) Suppliers (active + approved) ─────────────────────────────────
     const { data: suppliers, error } = await supabaseAdmin
       .from('suppliers')
       .select('id,name,category,tagline,city,region,minimum_order_php,rating,review_count,verified,plan,active,vat_registered,cold_chain,years_in_business,logo_url')
