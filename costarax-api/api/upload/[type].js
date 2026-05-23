@@ -139,14 +139,24 @@ Supplier: ${supplierName}`
             error: 'Could not extract text from this PDF. It may be a scanned image. Please take a screenshot and upload as a JPG/PNG instead.'
           })
         }
+        // Strip repeating page headers (phone lines, "Page N" markers, fax/email
+        // header rows that pdf-parse inserts at the start of every page).
+        // Each page header wastes ~100-200 chars of our token budget. Stripping
+        // them recovers space for actual product rows, especially on 20+ page PDFs.
+        pdfText = pdfText
+          .replace(/^\+63[\d\s\/\.\-\(\)]+.*$/mg, '')  // phone/fax lines starting with +63
+          .replace(/^Page\s+\d+\s*$/mg, '')             // "Page N" standalone lines
+          .replace(/^Fax[\s:]+[\d\s\/\+\-]+$/mg, '')   // "Fax: ..." lines
+          .replace(/\n{3,}/g, '\n\n')                   // collapse excessive blank lines
+          .trim()
         // For large price lists, split into parallel chunks so we can handle
         // 500-1000 products within the Vercel Hobby 10-second timeout.
         // Each chunk is ~6000 chars → ~150-200 products per AI call.
-        // Up to 6 parallel calls → ~900-1200 products total.
+        // Up to 10 parallel calls → covers ~60,000 chars (enough for any real PDF).
         const CHUNK = 6000
         if (pdfText.length > CHUNK) {
           const chunks = []
-          for (let i = 0; i < pdfText.length && chunks.length < 6; i += CHUNK) {
+          for (let i = 0; i < pdfText.length && chunks.length < 10; i += CHUNK) {
             chunks.push(pdfText.slice(i, i + CHUNK))
           }
           const anthropicInner = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
