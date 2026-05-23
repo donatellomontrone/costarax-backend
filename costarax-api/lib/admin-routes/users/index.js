@@ -2,6 +2,7 @@
 const { supabaseAdmin, requireAdmin, requireSuperAdmin } = require('../../supabase-admin')
 const { sendEmail, adminCreatedAccountEmail, adminRoleChangedEmail } = require('../../email')
 const { enforce } = require('../../rate-limit')
+const { logAdminAction } = require('../../admin-audit')
 
 module.exports = async (req, res) => {
   const auth = await requireAdmin(req, res)
@@ -18,7 +19,7 @@ module.exports = async (req, res) => {
     const [profilesRes, orgsRes] = await Promise.all([
       supabaseAdmin.from('profiles').select('id,email,role').in('id', ids),
       supabaseAdmin.from('organization_members')
-        .select('user_id,supplier_id,business_id,suppliers(name),businesses(name)')
+        .select('user_id,supplier_id,business_id,suppliers(name,status,active),businesses(name,status)')
         .in('user_id', ids),
     ])
 
@@ -26,8 +27,14 @@ module.exports = async (req, res) => {
     const supplierOrgByUser = {}
     const businessOrgByUser = {}
     ;(orgsRes.data || []).forEach(m => {
-      if (m?.supplier_id) supplierOrgByUser[m.user_id] = m
-      if (m?.business_id) businessOrgByUser[m.user_id] = m
+      if (m?.supplier_id) {
+        const current = supplierOrgByUser[m.user_id]
+        if (!current || scoreSupplierMembership(m) > scoreSupplierMembership(current)) supplierOrgByUser[m.user_id] = m
+      }
+      if (m?.business_id) {
+        const current = businessOrgByUser[m.user_id]
+        if (!current || scoreBusinessMembership(m) > scoreBusinessMembership(current)) businessOrgByUser[m.user_id] = m
+      }
     })
 
     const result = users.map(u => ({
@@ -98,6 +105,16 @@ module.exports = async (req, res) => {
       } catch (e) { console.error('[patch-user] role-change email failed', e.message) }
     }
 
+    await logAdminAction(supabaseAdmin, {
+      admin_id: auth.user.id,
+      action_type: 'edit_user',
+      target_id: id,
+      notes: [
+        roleChanged ? `role ${roleChanged.oldRole || '—'} -> ${roleChanged.newRole}` : null,
+        email?.trim() ? `email -> ${email.trim().toLowerCase()}` : null,
+      ].filter(Boolean).join(' · ')
+    })
+
     return res.status(200).json({ message: 'User updated', roleChanged: !!roleChanged, roleEmailSent })
   }
 
@@ -123,6 +140,12 @@ module.exports = async (req, res) => {
         const { error: omErr } = await supabaseAdmin.from('organization_members').insert({ user_id: id, supplier_id })
         if (omErr) return res.status(500).json({ error: omErr.message })
       }
+      await logAdminAction(supabaseAdmin, {
+        admin_id: auth.user.id,
+        action_type: supplier_id ? 'link_supplier_user' : 'unlink_supplier_user',
+        target_id: id,
+        notes: supplier_id ? `linked supplier ${supplier_id}` : 'removed supplier link'
+      })
       return res.status(200).json({ message: supplier_id ? 'Supplier linked' : 'Supplier unlinked' })
     }
 
@@ -191,6 +214,13 @@ module.exports = async (req, res) => {
       const tpl = adminCreatedAccountEmail({ contactEmail: email.trim().toLowerCase(), role: dbRole, resetLink })
       const emailRes = await sendEmail({ to: email.trim().toLowerCase(), ...tpl })
 
+      await logAdminAction(supabaseAdmin, {
+        admin_id: auth.user.id,
+        action_type: 'create_user',
+        target_id: created.user.id,
+        notes: `created ${email.trim().toLowerCase()} as ${dbRole}${supplier_id ? ` · linked supplier ${supplier_id}` : ''}`
+      })
+
       return res.status(201).json({
         message: 'User created',
         id: created.user.id,
@@ -235,6 +265,12 @@ module.exports = async (req, res) => {
     })
 
     const emailSent = emailResult?.ok === true
+    await logAdminAction(supabaseAdmin, {
+      admin_id: auth.user.id,
+      action_type: 'send_password_reset',
+      target_id: id || null,
+      notes: `reset sent to ${targetEmail}`
+    })
     return res.status(200).json({
       message: emailSent
         ? `Reset email sent to ${targetEmail}`
@@ -285,4 +321,23 @@ module.exports = async (req, res) => {
   }
 
   return res.status(405).json({ error: 'Method not allowed' })
+}
+
+function scoreSupplierMembership(row) {
+  const supplier = row?.suppliers || {}
+  let score = 0
+  if (supplier.status === 'approved') score += 100
+  if (supplier.active) score += 50
+  if (supplier.status === 'pending') score += 10
+  if (supplier.status === 'rejected') score -= 100
+  return score
+}
+
+function scoreBusinessMembership(row) {
+  const business = row?.businesses || {}
+  let score = 0
+  if (business.status === 'approved') score += 100
+  if (business.status === 'pending') score += 10
+  if (business.status === 'rejected') score -= 100
+  return score
 }

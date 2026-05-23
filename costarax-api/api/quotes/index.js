@@ -2,6 +2,7 @@ const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { sendEmail, quoteReceivedEmail } = require('../../lib/email')
 const { notify } = require('../../lib/notify')
 const { applyCors } = require('../../lib/cors')
+const { resolveSupplierMembership, resolveBusinessMembership } = require('../../lib/user-context')
 
 module.exports = async (req, res) => {
   if (applyCors(req, res, { methods: 'GET,POST,OPTIONS' })) return
@@ -32,18 +33,16 @@ module.exports = async (req, res) => {
         .from('businesses').select('id').eq('contact_email', auth.user.email).single()
 
       if (!biz) {
-        const { data: org } = await supabaseAdmin
-          .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
-        if (!org) return res.status(200).json([])
+        const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
+        if (!org?.business_id) return res.status(200).json([])
         ;({ data, error } = await fetchBuyerQuotes(org.business_id))
       } else {
         ;({ data, error } = await fetchBuyerQuotes(biz.id))
       }
 
     } else if (auth.profile.role === 'supplier') {
-      const { data: org } = await supabaseAdmin
-        .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
-      if (!org) return res.status(200).json([])
+      const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
+      if (!org?.supplier_id) return res.status(200).json([])
       ;({ data, error } = await supabaseAdmin.from('quote_requests')
         .select('id,buyer_business_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at')
         .eq('supplier_id', org.supplier_id).order('created_at', { ascending: false }))
@@ -88,8 +87,7 @@ module.exports = async (req, res) => {
       buyerBusinessId = biz.id
       buyerName = biz.name
     } else {
-      const { data: org } = await supabaseAdmin
-        .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
+      const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
       if (org?.business_id) {
         buyerBusinessId = org.business_id
         const { data: b } = await supabaseAdmin.from('businesses').select('name').eq('id', org.business_id).single()

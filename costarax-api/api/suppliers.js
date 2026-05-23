@@ -1,6 +1,7 @@
 const { supabaseAdmin, verifyToken, requireAuth } = require('../lib/supabase-admin')
 const { sendEmail } = require('../lib/email')
 const { applyCors } = require('../lib/cors')
+const { resolveSupplierMembership } = require('../lib/user-context')
 
 // Fields a supplier can edit themselves (no name/tin/verified/plan/status/trial)
 const SUPPLIER_EDITABLE = [
@@ -21,15 +22,7 @@ module.exports = async (req, res) => {
       const auth = await requireAuth(req, res)
       if (!auth) return
 
-      // Look up which supplier this user belongs to
-      const { data: orgMember } = await supabaseAdmin
-        .from('organization_members')
-        .select('supplier_id')
-        .eq('user_id', auth.user.id)
-        .not('supplier_id', 'is', null)
-        .limit(1)
-        .maybeSingle()
-
+      const orgMember = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
       if (!orgMember?.supplier_id) {
         return res.status(403).json({ error: 'No supplier account linked to this user' })
       }
@@ -95,14 +88,7 @@ module.exports = async (req, res) => {
 
     // ── 1) Supplier self lookup (own record regardless of approval state) ─
     if (req.query?.mine === '1') {
-      const { data: orgMember } = await supabaseAdmin
-        .from('organization_members')
-        .select('supplier_id')
-        .eq('user_id', user.id)
-        .not('supplier_id', 'is', null)
-        .limit(1)
-        .maybeSingle()
-
+      const orgMember = await resolveSupplierMembership(supabaseAdmin, user.id, user.email)
       if (!orgMember?.supplier_id) return res.status(404).json({ error: 'No supplier linked to this user' })
 
       const { data: supplier, error: ownErr } = await supabaseAdmin

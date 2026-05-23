@@ -2,6 +2,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { applyCors } = require('../lib/cors');
 const { enforce, clientIp } = require('../lib/rate-limit');
 const { supabaseAdmin, verifyToken } = require('../lib/supabase-admin');
+const { resolveUserContext } = require('../lib/user-context');
 
 const SYSTEM = `You are the Costarax support assistant — helpful, concise, and direct.
 
@@ -128,37 +129,18 @@ async function handleSupportMode(req, res, body) {
   // a user can hold both memberships, and they might be using the buyer UI
   // even though their primary profile is supplier (or vice-versa).
   async function resolveCtx() {
+    const fullCtx = await resolveUserContext(supabaseAdmin, user.id, user.email);
     const hinted = body.active_role;
     const role =
       hinted === 'supplier' ? 'supplier' :
       hinted === 'buyer' || hinted === 'business' ? 'buyer' :
       isAdmin ? 'admin' :
       userRole === 'supplier' ? 'supplier' : 'buyer';
-    const ctx = { role };
-    try {
-      if (role === 'buyer') {
-        const { data: m } = await supabaseAdmin
-          .from('organization_members').select('business_id')
-          .eq('user_id', user.id).not('business_id', 'is', null)
-          .limit(1).maybeSingle();
-        if (m?.business_id) {
-          const { data: b } = await supabaseAdmin
-            .from('businesses').select('name').eq('id', m.business_id).maybeSingle();
-          if (b?.name) ctx.businessName = b.name;
-        }
-      } else if (role === 'supplier') {
-        const { data: m } = await supabaseAdmin
-          .from('organization_members').select('supplier_id')
-          .eq('user_id', user.id).not('supplier_id', 'is', null)
-          .limit(1).maybeSingle();
-        if (m?.supplier_id) {
-          const { data: s } = await supabaseAdmin
-            .from('suppliers').select('name').eq('id', m.supplier_id).maybeSingle();
-          if (s?.name) ctx.supplierName = s.name;
-        }
-      }
-    } catch (_) {}
-    return ctx;
+    return {
+      role,
+      businessName: fullCtx.business?.name || null,
+      supplierName: fullCtx.supplier?.name || null,
+    };
   }
 
   if (action === 'start') {

@@ -2,6 +2,7 @@ const crypto = require('crypto')
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { sendEmail, quoteReceivedEmail } = require('../../lib/email')
 const { applyCors } = require('../../lib/cors')
+const { resolveBusinessMembership } = require('../../lib/user-context')
 
 module.exports = async (req, res) => {
   try {
@@ -40,8 +41,7 @@ module.exports = async (req, res) => {
       .from('businesses').select('id,name').eq('contact_email', auth.user.email).single()
     if (biz) { buyerBusinessId = biz.id; buyerName = biz.name }
     else {
-      const { data: org } = await supabaseAdmin
-        .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
+      const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
       if (org?.business_id) {
         buyerBusinessId = org.business_id
         const { data: b } = await supabaseAdmin.from('businesses').select('name').eq('id', org.business_id).single()

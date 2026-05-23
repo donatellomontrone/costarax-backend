@@ -1,5 +1,6 @@
 const { supabaseAdmin, requireAuth } = require('../../../lib/supabase-admin')
 const { applyCors } = require('../../../lib/cors')
+const { resolveBusinessMembership, resolveSupplierMembership } = require('../../../lib/user-context')
 
 async function getCallerQuoteAccess(auth, quoteId) {
   const { data: quote } = await supabaseAdmin
@@ -14,16 +15,14 @@ async function getCallerQuoteAccess(auth, quoteId) {
       .from('businesses').select('id').eq('contact_email', auth.user.email).single()
     let bid = biz?.id
     if (!bid) {
-      const { data: org } = await supabaseAdmin
-        .from('organization_members').select('business_id').eq('user_id', auth.user.id).maybeSingle()
+      const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
       bid = org?.business_id
     }
     return { quote, allowed: !!bid && bid === quote.buyer_business_id }
   }
 
   if (role === 'supplier') {
-    const { data: org } = await supabaseAdmin
-      .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
+    const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
     return { quote, allowed: !!org && org.supplier_id === quote.supplier_id }
   }
 
