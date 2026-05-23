@@ -106,6 +106,10 @@ module.exports = async (req, res) => {
       // Remove any existing supplier link for this user
       await supabaseAdmin.from('organization_members').delete().eq('user_id', id).not('supplier_id', 'is', null)
       if (supplier_id) {
+        // Supplier access is currently single-owner in the admin flow: when an
+        // admin re-links a supplier to a new email, detach any previous user(s)
+        // from that supplier first so login resolution and admin UI stay sane.
+        await supabaseAdmin.from('organization_members').delete().eq('supplier_id', supplier_id)
         const { error: omErr } = await supabaseAdmin.from('organization_members').insert({ user_id: id, supplier_id })
         if (omErr) return res.status(500).json({ error: omErr.message })
       }
