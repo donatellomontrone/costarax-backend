@@ -106,6 +106,8 @@ Supplier: ${supplierName}`
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
     let userContent
+    // claude-sonnet-4-5-20250929 = stable dated GA release for PDF document support.
+    // claude-haiku-4-5-20251001  = faster/cheaper for plain text / images.
     let model = 'claude-haiku-4-5-20251001'
 
     if (hasFile) {
@@ -116,11 +118,15 @@ Supplier: ${supplierName}`
       if (!isPdf && !isImage) {
         return res.status(415).json({ error: `Unsupported file type "${file_mime}". Use PDF or image (jpg, png, webp).` })
       }
-      if (isPdf) model = 'claude-sonnet-4-6'
+      if (isPdf) model = 'claude-sonnet-4-5-20250929'
       userContent = [
         {
           type: isPdf ? 'document' : 'image',
-          source: { type: 'base64', media_type: file_mime, data: file_b64 }
+          source: {
+            type: 'base64',
+            media_type: isPdf ? 'application/pdf' : file_mime,
+            data: file_b64
+          }
         },
         { type: 'text', text: `${ruleBlock}\n\nThe price list is the attached ${isPdf ? 'PDF' : 'image'}. Read every product line and emit the JSON array. Output ONLY JSON.` }
       ]
@@ -130,7 +136,7 @@ Supplier: ${supplierName}`
 
     const aiMsg = await anthropic.messages.create({
       model,
-      max_tokens: hasFile ? 4000 : 2000,
+      max_tokens: 2000,
       temperature: 0,
       system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
       messages: [{ role: 'user', content: userContent }]
@@ -159,11 +165,18 @@ Supplier: ${supplierName}`
       }
     }
   } catch (e) {
-    console.error('[price-list upload] AI extraction error:', e.message, e.status, e.error)
-    if (uploadId) {
-      await supabaseAdmin.from('price_list_uploads').update({ status: 'rejected', ai_summary: JSON.stringify({ error: e.message }) }).eq('id', uploadId)
+    const errDetail = {
+      message: e.message,
+      status: e.status,
+      error: e.error,
+      type: e.constructor?.name,
+      stack: e.stack?.split('\n').slice(0,4).join(' | ')
     }
-    return res.status(500).json({ error: 'AI extraction failed: ' + e.message })
+    console.error('[price-list upload] AI extraction error:', JSON.stringify(errDetail))
+    if (uploadId) {
+      await supabaseAdmin.from('price_list_uploads').update({ status: 'rejected', ai_summary: JSON.stringify({ error: e.message, detail: errDetail }) }).eq('id', uploadId)
+    }
+    return res.status(500).json({ error: 'AI extraction failed: ' + e.message, detail: errDetail })
   }
 
   if (!extracted.length) return res.status(422).json({ error: 'No products found in the file.' })
