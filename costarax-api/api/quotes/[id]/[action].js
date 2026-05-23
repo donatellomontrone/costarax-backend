@@ -1,5 +1,5 @@
 const { supabaseAdmin, requireAuth } = require('../../../lib/supabase-admin')
-const { sendEmail, quoteRepliedEmail, orderConfirmedEmail, orderFulfilledEmail } = require('../../../lib/email')
+const { sendEmail, quoteRepliedEmail, orderConfirmedEmail, orderFulfilledEmail, orderPreparingEmail, orderDispatchedEmail, orderDeliveredSupplierEmail } = require('../../../lib/email')
 const { notify } = require('../../../lib/notify')
 const { applyCors } = require('../../../lib/cors')
 
@@ -205,6 +205,103 @@ module.exports = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
     return res.status(201).json({ message: 'Review submitted' })
+  }
+
+  // ── PREPARE ───────────────────────────────────────────────────────────────
+  if (action === 'prepare') {
+    if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
+
+    const { data: quote, error: qErr } = await supabaseAdmin
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+    if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
+    if (quote.status !== 'confirmed') return res.status(400).json({ error: 'Quote must be confirmed before marking as preparing' })
+
+    if (auth.profile.role !== 'admin') {
+      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+      if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
+    }
+
+    const { error } = await supabaseAdmin.from('quote_requests').update({
+      status: 'preparing', preparing_at: new Date().toISOString()
+    }).eq('id', id)
+    if (error) return res.status(500).json({ error: error.message })
+
+    try {
+      const buyerEmail = quote.businesses?.contact_email
+      if (buyerEmail) {
+        const tpl = orderPreparingEmail({ buyerName: quote.businesses?.name, supplierName: quote.suppliers?.name })
+        await sendEmail({ to: buyerEmail, ...tpl }).catch(e => console.log('Email error:', e.message))
+      }
+    } catch (_) {}
+    return res.status(200).json({ message: 'Order marked as preparing' })
+  }
+
+  // ── DISPATCH ──────────────────────────────────────────────────────────────
+  if (action === 'dispatch') {
+    if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
+
+    const { data: quote, error: qErr } = await supabaseAdmin
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+    if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
+    if (quote.status !== 'preparing') return res.status(400).json({ error: 'Quote must be in preparing status to dispatch' })
+
+    if (auth.profile.role !== 'admin') {
+      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+      if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
+    }
+
+    const { error } = await supabaseAdmin.from('quote_requests').update({
+      status: 'dispatched', dispatched_at: new Date().toISOString()
+    }).eq('id', id)
+    if (error) return res.status(500).json({ error: error.message })
+
+    try {
+      const buyerEmail = quote.businesses?.contact_email
+      if (buyerEmail) {
+        const tpl = orderDispatchedEmail({ buyerName: quote.businesses?.name, supplierName: quote.suppliers?.name })
+        await sendEmail({ to: buyerEmail, ...tpl }).catch(e => console.log('Email error:', e.message))
+      }
+      notify({ event: 'order_dispatched', to: quote.businesses?.contact_phone, data: { supplierName: quote.suppliers?.name || 'Your supplier' } })
+    } catch (_) {}
+    return res.status(200).json({ message: 'Order dispatched' })
+  }
+
+  // ── DELIVER ───────────────────────────────────────────────────────────────
+  if (action === 'deliver') {
+    if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
+
+    const { data: quote, error: qErr } = await supabaseAdmin
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+    if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
+    if (quote.status !== 'dispatched') return res.status(400).json({ error: 'Order must be dispatched before confirming delivery' })
+
+    if (auth.profile.role !== 'admin') {
+      let buyerBusinessId = null
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      if (biz) { buyerBusinessId = biz.id } else {
+        const { data: org } = await supabaseAdmin.from('organization_members').select('business_id').eq('user_id', auth.user.id).single()
+        buyerBusinessId = org?.business_id || null
+      }
+      if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
+    }
+
+    // Confirming delivery marks as fulfilled, which unlocks the existing review flow
+    const { error } = await supabaseAdmin.from('quote_requests').update({
+      status: 'fulfilled', fulfilled_at: new Date().toISOString()
+    }).eq('id', id)
+    if (error) return res.status(500).json({ error: error.message })
+
+    try {
+      const { data: member } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).single()
+      if (member?.user_id) {
+        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', member.user_id).single()
+        if (sp?.email) {
+          const tpl = orderDeliveredSupplierEmail({ buyerName: quote.businesses?.name, supplierName: quote.suppliers?.name })
+          await sendEmail({ to: sp.email, ...tpl }).catch(e => console.log('Email error:', e.message))
+        }
+      }
+    } catch (_) {}
+    return res.status(200).json({ message: 'Delivery confirmed' })
   }
 
   // ── RECURRING ─────────────────────────────────────────────────────────────

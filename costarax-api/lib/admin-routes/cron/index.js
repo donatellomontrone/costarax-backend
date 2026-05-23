@@ -5,7 +5,7 @@
 // Vercel calls this with: Authorization: Bearer <CRON_SECRET>
 
 const { supabaseAdmin } = require('../../supabase-admin')
-const { sendEmail } = require('../../email')
+const { sendEmail, watchlistPriceAlertEmail } = require('../../email')
 const { notify } = require('../../notify')
 
 const FREQ_DAYS = { weekly: 7, biweekly: 14, monthly: 30 }
@@ -22,7 +22,7 @@ module.exports = async (req, res) => {
   const auth = req.headers.authorization || ''
   if (auth !== `Bearer ${secret}`) return res.status(401).json({ error: 'Unauthorized' })
 
-  const results = { recurring: [], stale: [], errors: [] }
+  const results = { recurring: [], stale: [], watchlistAlerts: [], errors: [] }
 
   // ── 1. RECURRING ORDERS ─────────────────────────────────────────────────
   try {
@@ -149,10 +149,98 @@ module.exports = async (req, res) => {
     results.errors.push(`stale block: ${e.message}`)
   }
 
+  // ── 3. WATCHLIST PRICE ALERTS ────────────────────────────────────────────
+  // For each business's watched products, compare current best price against
+  // 7-day-ago price. Email the buyer if any product dropped or rose >7%.
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString()
+
+    // Load all watchlist entries with business contact info
+    const { data: watchlistItems } = await supabaseAdmin
+      .from('buyer_watchlist')
+      .select('product_id, business_id, businesses(name, contact_email)')
+
+    if (watchlistItems?.length) {
+      // Current best prices per product
+      const productIds = [...new Set(watchlistItems.map(w => w.product_id))]
+      const { data: currentPrices } = await supabaseAdmin
+        .from('supplier_prices')
+        .select('product_id, price_php, unit')
+        .in('product_id', productIds)
+        .eq('active', true)
+
+      // Best price 7 days ago from price_history
+      const { data: histPrices } = await supabaseAdmin
+        .from('price_history')
+        .select('product_id, price_php, unit, recorded_at')
+        .in('product_id', productIds)
+        .lt('recorded_at', sevenDaysAgo)
+        .order('recorded_at', { ascending: false })
+
+      // Product names
+      const { data: productRows } = await supabaseAdmin
+        .from('products')
+        .select('id, canonical_name, default_unit')
+        .in('id', productIds)
+
+      const productMap = Object.fromEntries((productRows || []).map(p => [p.id, p]))
+
+      // Best current price per product
+      const bestCurrent = {}
+      ;(currentPrices || []).forEach(r => {
+        if (!bestCurrent[r.product_id] || r.price_php < bestCurrent[r.product_id].price) {
+          bestCurrent[r.product_id] = { price: r.price_php, unit: r.unit }
+        }
+      })
+
+      // Best historical price per product (most recent before 7d cutoff)
+      const bestHist = {}
+      ;(histPrices || []).forEach(r => {
+        if (!bestHist[r.product_id]) bestHist[r.product_id] = { price: r.price_php, unit: r.unit }
+      })
+
+      // Group watchlist by business_id
+      const byBusiness = {}
+      watchlistItems.forEach(w => {
+        if (!byBusiness[w.business_id]) byBusiness[w.business_id] = { biz: w.businesses, items: [] }
+        byBusiness[w.business_id].items.push(w.product_id)
+      })
+
+      for (const [bizId, { biz, items }] of Object.entries(byBusiness)) {
+        if (!biz?.contact_email) continue
+        const alerts = []
+        items.forEach(pid => {
+          const cur = bestCurrent[pid]
+          const hist = bestHist[pid]
+          if (!cur || !hist || !hist.price) return
+          const pct = Math.round(((cur.price - hist.price) / hist.price) * 100)
+          if (Math.abs(pct) >= 7) {
+            alerts.push({
+              productName: productMap[pid]?.canonical_name || pid,
+              unit: cur.unit || productMap[pid]?.default_unit || 'unit',
+              currentPrice: cur.price,
+              prevPrice: hist.price,
+              pct,
+            })
+          }
+        })
+        if (!alerts.length) continue
+
+        alerts.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))
+        const tpl = watchlistPriceAlertEmail({ buyerName: biz.name, alerts })
+        await sendEmail({ to: biz.contact_email, ...tpl }).catch(e => console.log('[watchlist alert email error]', e.message))
+        results.watchlistAlerts.push({ bizId, alertCount: alerts.length })
+      }
+    }
+  } catch (e) {
+    results.errors.push(`watchlist block: ${e.message}`)
+  }
+
   return res.status(200).json({
     ok: true,
-    recurringCreated: results.recurring.length,
-    staleReminders:  results.stale.length,
-    errors:          results.errors,
+    recurringCreated:  results.recurring.length,
+    staleReminders:    results.stale.length,
+    watchlistAlerts:   results.watchlistAlerts.length,
+    errors:            results.errors,
   })
 }

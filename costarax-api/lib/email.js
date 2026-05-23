@@ -194,4 +194,56 @@ function orderFulfilledEmail({ buyerName, supplierName, products }) {
   return { subject: `Your order has been fulfilled by ${supplierName} — Costarax`, html: layout('Order fulfilled — Costarax', body) }
 }
 
-module.exports = { sendEmail, quoteReceivedEmail, quoteRepliedEmail, accessRequestEmail, accessApprovedEmail, adminCreatedAccountEmail, adminRoleChangedEmail, orderConfirmedEmail, orderFulfilledEmail }
+function orderPreparingEmail({ buyerName, supplierName }) {
+  const body = `
+    ${h2('Your order is being prepared')}
+    ${p(`<strong>${supplierName}</strong> has started preparing your order.`)}
+    ${p('You will receive another notification once your order is dispatched for delivery.')}
+    ${btn(`${APP_URL}/app.html?role=business`, 'Track your order')}
+  `
+  return { subject: `Your order is being prepared by ${supplierName} — Costarax`, html: layout('Order preparing — Costarax', body) }
+}
+
+function orderDispatchedEmail({ buyerName, supplierName }) {
+  const body = `
+    ${h2('Your order is out for delivery')}
+    ${p(`<strong>${supplierName}</strong> has dispatched your order — it is now on its way to you.`)}
+    ${p('Please confirm delivery once you receive the goods.')}
+    ${btn(`${APP_URL}/app.html?role=business`, 'Confirm delivery')}
+  `
+  return { subject: `Your order is out for delivery from ${supplierName} — Costarax`, html: layout('Order dispatched — Costarax', body) }
+}
+
+function orderDeliveredSupplierEmail({ buyerName, supplierName }) {
+  const body = `
+    ${h2('Delivery confirmed')}
+    ${p(`<strong>${buyerName}</strong> has confirmed they received your delivery.`)}
+    ${p('The order is now complete. The buyer may submit a review shortly.')}
+    ${btn(`${APP_URL}/app.html?role=supplier`, 'View on Costarax')}
+  `
+  return { subject: `Delivery confirmed by ${buyerName} — Costarax`, html: layout('Delivery confirmed — Costarax', body) }
+}
+
+function watchlistPriceAlertEmail({ buyerName, alerts }) {
+  const rows = alerts.map(a =>
+    row(a.productName, `<span style="color:#1A5C3A;font-weight:700">₱${Number(a.currentPrice).toLocaleString()}/${a.unit}</span> <span style="color:#7A7870">(was ₱${Number(a.prevPrice).toLocaleString()} · ${a.pct > 0 ? '+' : ''}${a.pct}%)</span>`)
+  ).join('')
+  const body = `
+    ${h2('Price alert — your watchlist')}
+    ${p(`Hi ${buyerName || 'there'}, prices moved on products you are watching:`)}
+    ${table(...alerts.map(a => row(a.productName, `<span style="color:${a.pct < 0 ? '#1A5C3A' : '#DC2626'};font-weight:700">₱${Number(a.currentPrice).toLocaleString()}/${a.unit}</span> <span style="color:#7A7870">(was ₱${Number(a.prevPrice).toLocaleString()} · ${a.pct > 0 ? '▲' : '▼'}${Math.abs(a.pct)}%)</span>`)))}
+    ${btn(`${APP_URL}/app.html?role=business`, 'View prices on Costarax')}
+    ${p('<span style="font-size:12px;color:#9A9890;">You are receiving this because you starred these products in your Costarax watchlist.</span>')}
+  `
+  return { subject: `Price alert: ${alerts.length} watchlist product${alerts.length > 1 ? 's' : ''} moved — Costarax`, html: layout('Price alert — Costarax', body) }
+}
+
+module.exports = {
+  sendEmail,
+  quoteReceivedEmail, quoteRepliedEmail,
+  accessRequestEmail, accessApprovedEmail,
+  adminCreatedAccountEmail, adminRoleChangedEmail,
+  orderConfirmedEmail, orderFulfilledEmail,
+  orderPreparingEmail, orderDispatchedEmail, orderDeliveredSupplierEmail,
+  watchlistPriceAlertEmail,
+}
