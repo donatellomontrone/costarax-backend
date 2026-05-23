@@ -12,6 +12,7 @@ const https = require('https')
 const fs = require('fs')
 const { formidable } = require('formidable')
 const Anthropic = require('@anthropic-ai/sdk')
+const pdfParse = require('pdf-parse')
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { applyCors } = require('../../lib/cors')
 
@@ -106,30 +107,48 @@ Supplier: ${supplierName}`
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
     let userContent
-    // claude-sonnet-4-5-20250929 = stable dated GA release for PDF document support.
-    // claude-haiku-4-5-20251001  = faster/cheaper for plain text / images.
-    let model = 'claude-haiku-4-5-20251001'
+    // Always use Haiku — it's fast enough to finish within Vercel Hobby's 10-second
+    // function limit. PDFs are pre-processed into text server-side with pdf-parse
+    // so we never need to send a raw PDF binary to the AI (which would require
+    // Sonnet and would always timeout at 10s).
+    const model = 'claude-haiku-4-5-20251001'
 
     if (hasFile) {
-      // Build a multimodal content block. PDFs use the 'document' block (needs
-      // Sonnet — Haiku doesn't support PDF). Images go through Haiku just fine.
       const isPdf   = /pdf/i.test(file_mime)
       const isImage = /^image\//i.test(file_mime)
       if (!isPdf && !isImage) {
         return res.status(415).json({ error: `Unsupported file type "${file_mime}". Use PDF or image (jpg, png, webp).` })
       }
-      if (isPdf) model = 'claude-sonnet-4-5-20250929'
-      userContent = [
-        {
-          type: isPdf ? 'document' : 'image',
-          source: {
-            type: 'base64',
-            media_type: isPdf ? 'application/pdf' : file_mime,
-            data: file_b64
-          }
-        },
-        { type: 'text', text: `${ruleBlock}\n\nThe price list is the attached ${isPdf ? 'PDF' : 'image'}. Read every product line and emit the JSON array. Output ONLY JSON.` }
-      ]
+
+      if (isPdf) {
+        // Extract text from the PDF with pdf-parse (runs in <1 s server-side).
+        // This avoids the 10-second Vercel Hobby timeout that Sonnet + raw PDF
+        // would cause. For scanned/image-only PDFs pdf-parse returns little text;
+        // in that case we fall back to a polite error asking the user to use an
+        // image screenshot instead.
+        const pdfBuffer = Buffer.from(file_b64, 'base64')
+        let pdfText = ''
+        try {
+          const parsed = await pdfParse(pdfBuffer, { max: 0 })
+          pdfText = (parsed.text || '').trim()
+        } catch (pdfErr) {
+          console.warn('[price-list upload] pdf-parse failed:', pdfErr.message)
+        }
+        if (pdfText.length < 80) {
+          return res.status(422).json({
+            error: 'Could not extract text from this PDF. It may be a scanned image. Please take a screenshot and upload as a JPG/PNG instead.'
+          })
+        }
+        // Truncate to ~8000 chars — enough for a large price list while keeping
+        // the prompt well within Haiku's context window.
+        userContent = `${ruleBlock}\n---\n${pdfText.slice(0, 8000)}\n---\nJSON:`
+      } else {
+        // Images: send as vision block (Haiku supports image vision natively)
+        userContent = [
+          { type: 'image', source: { type: 'base64', media_type: file_mime, data: file_b64 } },
+          { type: 'text', text: `${ruleBlock}\n\nThe price list is the attached image. Read every product line and emit the JSON array. Output ONLY JSON.` }
+        ]
+      }
     } else {
       userContent = `${ruleBlock}\n---\n${text.slice(0, 4000)}\n---\nJSON:`
     }
