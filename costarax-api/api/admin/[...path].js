@@ -74,7 +74,10 @@ module.exports = async (req, res) => {
     const { error: insErr } = await supabaseAdmin.from('organization_members').insert({ user_id: user.id, supplier_id: supplier.id })
     if (insErr) return res.status(500).json({ step: 'insert', error: insErr.message })
     await supabaseAdmin.from('profiles').upsert({ id: user.id, email: user.email, role: 'supplier' }, { onConflict: 'id' })
-    return res.status(200).json({ ok: true, user: { id: user.id, email: user.email }, supplier, was: existing })
+    // Also activate the supplier if it's rejected/inactive
+    const { error: activateErr } = await supabaseAdmin.from('suppliers')
+      .update({ active: true, status: 'approved' }).eq('id', supplier.id)
+    return res.status(200).json({ ok: true, user: { id: user.id, email: user.email }, supplier, was: existing, activated: !activateErr, activateErr: activateErr?.message })
   }
 
   return res.status(404).json({ error: 'Admin route not found' })
