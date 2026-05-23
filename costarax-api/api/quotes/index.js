@@ -42,7 +42,7 @@ module.exports = async (req, res) => {
 
     } else if (auth.profile.role === 'supplier') {
       const { data: org } = await supabaseAdmin
-        .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+        .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
       if (!org) return res.status(200).json([])
       ;({ data, error } = await supabaseAdmin.from('quote_requests')
         .select('id,buyer_business_id,products_summary,message,weekly_volume,status,reply,replied_at,created_at')

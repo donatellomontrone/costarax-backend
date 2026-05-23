@@ -30,7 +30,7 @@ module.exports = async (req, res) => {
       if (!buyerBusinessId || buyerBusinessId !== quote.buyer_business_id) return res.status(403).json({ error: 'Not authorized' })
     } else if (auth.profile.role === 'supplier') {
       const { data: org } = await supabaseAdmin
-        .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+        .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
 
@@ -147,7 +147,7 @@ module.exports = async (req, res) => {
     if (quote.status !== 'confirmed') return res.status(400).json({ error: 'Quote must be confirmed before marking fulfilled' })
 
     if (auth.profile.role !== 'admin') {
-      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
 
@@ -217,7 +217,7 @@ module.exports = async (req, res) => {
     if (quote.status !== 'confirmed') return res.status(400).json({ error: 'Quote must be confirmed before marking as preparing' })
 
     if (auth.profile.role !== 'admin') {
-      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
 
@@ -246,7 +246,7 @@ module.exports = async (req, res) => {
     if (quote.status !== 'preparing') return res.status(400).json({ error: 'Quote must be in preparing status to dispatch' })
 
     if (auth.profile.role !== 'admin') {
-      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+      const { data: org } = await supabaseAdmin.from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
 

@@ -23,7 +23,7 @@ async function getCallerQuoteAccess(auth, quoteId) {
 
   if (role === 'supplier') {
     const { data: org } = await supabaseAdmin
-      .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).single()
+      .from('organization_members').select('supplier_id').eq('user_id', auth.user.id).not('supplier_id', 'is', null).limit(1).maybeSingle()
     return { quote, allowed: !!org && org.supplier_id === quote.supplier_id }
   }
 

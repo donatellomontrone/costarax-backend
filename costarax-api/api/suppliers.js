@@ -26,7 +26,9 @@ module.exports = async (req, res) => {
         .from('organization_members')
         .select('supplier_id')
         .eq('user_id', auth.user.id)
-        .single()
+        .not('supplier_id', 'is', null)
+        .limit(1)
+        .maybeSingle()
 
       if (!orgMember?.supplier_id) {
         return res.status(403).json({ error: 'No supplier account linked to this user' })
