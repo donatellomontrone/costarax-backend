@@ -155,7 +155,7 @@ Supplier: ${supplierName}`
 
     const aiMsg = await anthropic.messages.create({
       model,
-      max_tokens: 2000,
+      max_tokens: 4000,
       temperature: 0,
       system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
       messages: [{ role: 'user', content: userContent }]
@@ -163,16 +163,36 @@ Supplier: ${supplierName}`
     const content = aiMsg.content?.[0]?.text?.trim()
     if (!content) throw new Error('Empty response from Anthropic')
 
-    const jsonMatch = content.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/) || content.match(/(\[[\s\S]*\])/)
-    if (!jsonMatch) throw new Error('No JSON array returned by AI. Got: ' + content.slice(0, 200))
-    let rawJson = (jsonMatch[1] || jsonMatch[0]).trim()
+    // Try to find the JSON array. The AI should output a bare array, but sometimes
+    // wraps it in code fences. Also handle truncated responses (no closing ] or ```)
+    // by taking everything from the first [ to the end and repairing.
+    let rawJson = null
+    const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
+    const arrayMatch = content.match(/(\[[\s\S]*)/)  // greedy — takes all from first [
+    if (fenceMatch?.[1]?.trimStart().startsWith('[')) {
+      rawJson = fenceMatch[1].trim()
+    } else if (arrayMatch) {
+      rawJson = arrayMatch[1].trim()
+    }
+    if (!rawJson) throw new Error('No JSON array returned by AI. Got: ' + content.slice(0, 200))
+
+    // Ensure the array is closed (response may be truncated at max_tokens)
+    function closeJson(s) {
+      const t = s.trimEnd()
+      if (t.endsWith(']')) return t
+      // If truncated mid-object, find last complete object and close the array
+      const lastComplete = t.lastIndexOf('},')
+      if (lastComplete > 0) return t.slice(0, lastComplete + 1) + ']'
+      const lastObj = t.lastIndexOf('},\n') > -1 ? t.lastIndexOf('},\n') : t.lastIndexOf('}')
+      if (lastObj > 0) return t.slice(0, lastObj + 1) + ']'
+      return t + ']'
+    }
+    rawJson = closeJson(rawJson)
+
     try { extracted = JSON.parse(rawJson) }
     catch (_) {
       let repaired = rawJson.replace(/,\s*([}\]])/g, '$1').replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":').replace(/:\s*'([^']*)'/g, ': "$1"').replace(/[\x00-\x1F\x7F]/g, ' ')
-      if (!repaired.trimEnd().endsWith(']')) {
-        const lastGood = repaired.lastIndexOf('},')
-        repaired = (lastGood > 0 ? repaired.slice(0, lastGood + 1) : repaired) + ']'
-      }
+      repaired = closeJson(repaired)
       try { extracted = JSON.parse(repaired) }
       catch (e2) {
         const objs = []
