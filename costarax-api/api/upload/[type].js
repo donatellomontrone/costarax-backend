@@ -330,7 +330,9 @@ async function handleSupplierLogo(req, res) {
   const form = formidable({ maxFileSize: 2 * 1024 * 1024, maxFiles: 1 })
   let fields, files
   try { [fields, files] = await form.parse(req) } catch (e) { return res.status(400).json({ error: 'File parse error: ' + e.message }) }
-  const supplierId = Array.isArray(fields.supplier_id) ? fields.supplier_id[0] : fields.supplier_id
+  // supplier_id may come as a URL query param (?supplier_id=...) or as a form field
+  const supplierId = req.query.supplier_id ||
+    (Array.isArray(fields.supplier_id) ? fields.supplier_id[0] : fields.supplier_id)
   if (!supplierId) return res.status(400).json({ error: 'supplier_id is required' })
 
   if (auth.profile.role !== 'admin') {
