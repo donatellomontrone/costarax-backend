@@ -112,14 +112,19 @@ module.exports = async (req, res) => {
 
     // DELETE — remove supplier (soft delete)
     if (req.method === 'DELETE') {
-      const { data: s } = await supabaseAdmin.from('suppliers').select('name').eq('id', id).single()
+      const [{ data: s }, { data: members }] = await Promise.all([
+        supabaseAdmin.from('suppliers').select('name').eq('id', id).single(),
+        supabaseAdmin.from('organization_members').select('user_id, profiles(email)').eq('supplier_id', id),
+      ])
       const { error } = await supabaseAdmin.from('suppliers').update({ active: false, status: 'removed' }).eq('id', id)
       if (error) return res.status(500).json({ error: error.message })
+      await supabaseAdmin.from('organization_members').delete().eq('supplier_id', id)
+      const linkedEmails = (members || []).map(m => m.profiles?.email || m.user_id).filter(Boolean)
       await supabaseAdmin.from('admin_actions').insert({
         admin_id: auth.user.id, action_type: 'remove_supplier', target_id: id,
-        notes: `Removed supplier: ${s?.name}`
+        notes: `Removed supplier: ${s?.name}${linkedEmails.length ? ` · unlinked ${linkedEmails.join(', ')}` : ''}`
       })
-      return res.status(200).json({ message: 'Supplier removed' })
+      return res.status(200).json({ message: 'Supplier removed', unlinked_users: linkedEmails })
     }
 
     return res.status(405).json({ error: 'Method not allowed' })
