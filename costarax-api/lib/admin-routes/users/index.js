@@ -23,7 +23,12 @@ module.exports = async (req, res) => {
     ])
 
     const profileMap = Object.fromEntries((profilesRes.data || []).map(p => [p.id, p]))
-    const orgMap     = Object.fromEntries((orgsRes.data   || []).map(m => [m.user_id, m]))
+    const supplierOrgByUser = {}
+    const businessOrgByUser = {}
+    ;(orgsRes.data || []).forEach(m => {
+      if (m?.supplier_id) supplierOrgByUser[m.user_id] = m
+      if (m?.business_id) businessOrgByUser[m.user_id] = m
+    })
 
     const result = users.map(u => ({
       id:              u.id,
@@ -31,9 +36,9 @@ module.exports = async (req, res) => {
       role:            profileMap[u.id]?.role || '—',
       created_at:      u.created_at,
       last_sign_in_at: u.last_sign_in_at || null,
-      supplier_id:     orgMap[u.id]?.supplier_id || null,
-      supplier_name:   orgMap[u.id]?.suppliers?.name || null,
-      business_name:   orgMap[u.id]?.businesses?.name || null,
+      supplier_id:     supplierOrgByUser[u.id]?.supplier_id || null,
+      supplier_name:   supplierOrgByUser[u.id]?.suppliers?.name || null,
+      business_name:   businessOrgByUser[u.id]?.businesses?.name || null,
     })).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
 
     return res.status(200).json(result)
@@ -103,6 +108,11 @@ module.exports = async (req, res) => {
     // Link (or unlink) a user to a supplier organisation
     if (action === 'link_supplier') {
       if (!id) return res.status(400).json({ error: 'User id is required' })
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id)
+      const canonicalEmail = authUser?.user?.email?.trim()?.toLowerCase?.() || null
+      if (canonicalEmail) {
+        await supabaseAdmin.from('profiles').upsert({ id, email: canonicalEmail }, { onConflict: 'id' }).catch(() => {})
+      }
       // Remove any existing supplier link for this user
       await supabaseAdmin.from('organization_members').delete().eq('user_id', id).not('supplier_id', 'is', null)
       if (supplier_id) {

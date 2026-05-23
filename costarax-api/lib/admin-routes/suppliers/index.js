@@ -7,6 +7,9 @@ module.exports = async (req, res) => {
   // GET — list ALL suppliers (active + paused) with full details and subscription state.
   // Auto-pauses any supplier whose subscription's current_period_end is in the past.
   if (req.method === 'GET') {
+    const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
+    if (authErr) return res.status(500).json({ error: authErr.message })
+
     const { data: sups, error } = await supabaseAdmin
       .from('suppliers')
       .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at, trial_ends_at, logo_url')
@@ -23,18 +26,19 @@ module.exports = async (req, res) => {
           .in('supplier_id', ids),
         supabaseAdmin
           .from('organization_members')
-          .select('supplier_id, user_id, profiles(email)')
+          .select('supplier_id, user_id')
           .in('supplier_id', ids),
       ])
       subs = subsRes.data || []
       orgMembers = membersRes.data || []
     }
+    const emailByUserId = Object.fromEntries((authData?.users || []).map(u => [u.id, u.email || null]))
     const subBy = {}
     subs.forEach(s => { subBy[s.supplier_id] = s })
     const membersBySup = {}
     orgMembers.forEach(m => {
       if (!membersBySup[m.supplier_id]) membersBySup[m.supplier_id] = []
-      membersBySup[m.supplier_id].push({ user_id: m.user_id, email: m.profiles?.email || null })
+      membersBySup[m.supplier_id].push({ user_id: m.user_id, email: emailByUserId[m.user_id] || null })
     })
 
     const now = new Date()
