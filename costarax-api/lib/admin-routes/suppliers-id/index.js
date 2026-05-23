@@ -116,7 +116,7 @@ module.exports = async (req, res) => {
         supabaseAdmin.from('suppliers').select('name').eq('id', id).single(),
         supabaseAdmin.from('organization_members').select('user_id, profiles(email)').eq('supplier_id', id),
       ])
-      const { error } = await supabaseAdmin.from('suppliers').update({ active: false, status: 'removed' }).eq('id', id)
+      const { error } = await supabaseAdmin.from('suppliers').update({ active: false, status: 'rejected' }).eq('id', id)
       if (error) return res.status(500).json({ error: error.message })
       await supabaseAdmin.from('organization_members').delete().eq('supplier_id', id)
       const linkedEmails = (members || []).map(m => m.profiles?.email || m.user_id).filter(Boolean)
