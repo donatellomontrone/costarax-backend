@@ -97,7 +97,7 @@ module.exports = async (req, res) => {
 
   // ── POST — create user OR send password reset email ──────────────────────
   if (req.method === 'POST') {
-    const { id, email, action, password, role } = req.body || {}
+    const { id, email, action, password, role, supplier_id } = req.body || {}
 
     // Create a new user
     if (action === 'create') {
@@ -132,6 +132,15 @@ module.exports = async (req, res) => {
           error: `User created but role assignment failed: ${upsertErr.message}. Set the role manually.`,
           id: created.user.id,
         })
+      }
+
+      // Link supplier user to their organisation so login resolves correctly
+      if (dbRole === 'supplier' && supplier_id) {
+        const { error: omErr } = await supabaseAdmin.from('organization_members').insert({
+          user_id: created.user.id,
+          supplier_id,
+        })
+        if (omErr) console.error('[create-user] org_member insert failed:', omErr.message)
       }
 
       // Generate a one-time set-password link and notify the new user.
