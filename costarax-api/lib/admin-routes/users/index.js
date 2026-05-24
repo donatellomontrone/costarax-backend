@@ -11,6 +11,13 @@ module.exports = async (req, res) => {
 
   // ── GET — list all users with roles + org context ────────────────────────
   if (req.method === 'GET') {
+    const rawPage = Number(req.query?.page || 1)
+    const rawLimit = Number(req.query?.limit || 1000)
+    const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1
+    const limit = Math.min(1000, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 1000))
+    const q = String(req.query?.q || '').trim().toLowerCase()
+    const roleFilter = String(req.query?.role || '').trim().toLowerCase()
+
     const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
     if (authErr) return res.status(500).json({ error: authErr.message })
 
@@ -20,7 +27,7 @@ module.exports = async (req, res) => {
     const [profilesRes, orgsRes] = await Promise.all([
       supabaseAdmin.from('profiles').select('id,email,role').in('id', ids),
       supabaseAdmin.from('organization_members')
-        .select('user_id,supplier_id,business_id,suppliers(name,status,active),businesses(name,status)')
+        .select('user_id,supplier_id,business_id,suppliers(name,status,active,contact_email,city,region),businesses(name,status,city,region)')
         .in('user_id', ids),
     ])
 
@@ -46,10 +53,51 @@ module.exports = async (req, res) => {
       last_sign_in_at: u.last_sign_in_at || null,
       supplier_id:     supplierOrgByUser[u.id]?.supplier_id || null,
       supplier_name:   supplierOrgByUser[u.id]?.suppliers?.name || null,
+      supplier_status: supplierOrgByUser[u.id]?.suppliers?.status || null,
+      supplier_active: supplierOrgByUser[u.id]?.suppliers?.active ?? null,
+      supplier_contact_email: supplierOrgByUser[u.id]?.suppliers?.contact_email || null,
+      supplier_city: supplierOrgByUser[u.id]?.suppliers?.city || null,
+      supplier_region: supplierOrgByUser[u.id]?.suppliers?.region || null,
       business_name:   businessOrgByUser[u.id]?.businesses?.name || null,
+      business_status: businessOrgByUser[u.id]?.businesses?.status || null,
+      business_city: businessOrgByUser[u.id]?.businesses?.city || null,
+      business_region: businessOrgByUser[u.id]?.businesses?.region || null,
     })).sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
 
-    return res.status(200).json(result)
+    const filtered = result.filter(row => {
+      if (roleFilter && String(row.role || '').toLowerCase() !== roleFilter) return false
+      if (!q) return true
+      const haystack = [
+        row.email,
+        row.role,
+        row.supplier_name,
+        row.business_name,
+        row.supplier_contact_email,
+        row.supplier_city,
+        row.supplier_region,
+        row.business_city,
+        row.business_region,
+      ].filter(Boolean).join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+
+    const total = filtered.length
+    const start = (page - 1) * limit
+    const items = filtered.slice(start, start + limit)
+
+    if (!req.query?.page && !req.query?.limit && !req.query?.q && !req.query?.role) {
+      return res.status(200).json(filtered)
+    }
+
+    return res.status(200).json({
+      items,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    })
   }
 
   // ── PATCH — update role and/or email ─────────────────────────────────────
