@@ -17,6 +17,10 @@
       "destination": "/api/search?__route=me"
     },
     {
+      "source": "/api/my-prices",
+      "destination": "/api/suppliers?__route=my-prices"
+    },
+    {
       "source": "/api/admin/:seg1/:seg2/:seg3",
       "destination": "/api/admin/:seg1?_id=:seg2&_action=:seg3"
     },

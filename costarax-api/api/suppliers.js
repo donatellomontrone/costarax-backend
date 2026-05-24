@@ -86,6 +86,27 @@ module.exports = async (req, res) => {
     const user = await verifyToken(token)
     if (!user) return res.status(401).json({ error: 'Unauthorized' })
 
+    if (req.query?.__route === 'my-prices') {
+      const orgMember = await resolveSupplierMembership(supabaseAdmin, user.id, user.email)
+      if (!orgMember?.supplier_id) return res.status(404).json({ error: 'No supplier linked' })
+
+      const { data: active, error: aErr } = await supabaseAdmin
+        .from('supplier_prices')
+        .select('product_id, price_php, stock_qty, unit, updated_at, products(id, canonical_name, default_unit, category_id)')
+        .eq('supplier_id', orgMember.supplier_id)
+        .eq('active', true)
+      if (aErr) return res.status(500).json({ error: aErr.message })
+
+      const { data: hidden, error: hErr } = await supabaseAdmin
+        .from('supplier_prices')
+        .select('product_id, price_php, stock_qty, unit, updated_at, products(id, canonical_name, default_unit, category_id)')
+        .eq('supplier_id', orgMember.supplier_id)
+        .eq('active', false)
+      if (hErr) return res.status(500).json({ error: hErr.message })
+
+      return res.status(200).json({ supplier_id: orgMember.supplier_id, active: active || [], hidden: hidden || [] })
+    }
+
     // ── 1) Supplier self lookup (own record regardless of approval state) ─
     if (req.query?.mine === '1') {
       const orgMember = await resolveSupplierMembership(supabaseAdmin, user.id, user.email)
