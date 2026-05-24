@@ -33,14 +33,14 @@ begin
     where om.supplier_id = p_supplier_id;
   end if;
 
-  delete from public.organization_members
-  where user_id = p_user_id
-    and supplier_id is not null;
+  delete from public.organization_members om
+  where om.user_id = p_user_id
+    and om.supplier_id is not null;
 
   if p_supplier_id is not null then
-    delete from public.organization_members
-    where supplier_id = p_supplier_id
-      and user_id <> p_user_id;
+    delete from public.organization_members om
+    where om.supplier_id = p_supplier_id
+      and om.user_id <> p_user_id;
 
     insert into public.organization_members (user_id, supplier_id)
     values (p_user_id, p_supplier_id)

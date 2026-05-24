@@ -24,11 +24,13 @@ async function replaceSupplierLinkViaRpc(db, { userId, supplierId = null }) {
   if (error) {
     const msg = String(error.message || '')
     const code = String(error.code || '')
-    const missingFn =
+    const shouldFallback =
       code === '42883' ||
+      code === '42702' ||
       /admin_replace_supplier_link/i.test(msg) ||
-      /function .* does not exist/i.test(msg)
-    if (missingFn) return null
+      /function .* does not exist/i.test(msg) ||
+      /column reference .* is ambiguous/i.test(msg)
+    if (shouldFallback) return null
     throw new Error(error.message)
   }
 
