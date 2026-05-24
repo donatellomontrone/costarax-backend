@@ -90,21 +90,39 @@ module.exports = async (req, res) => {
       const orgMember = await resolveSupplierMembership(supabaseAdmin, user.id, user.email)
       if (!orgMember?.supplier_id) return res.status(404).json({ error: 'No supplier linked' })
 
-      const { data: active, error: aErr } = await supabaseAdmin
-        .from('supplier_prices')
-        .select('product_id, price_php, stock_qty, unit, updated_at, products(id, canonical_name, default_unit, category_id)')
-        .eq('supplier_id', orgMember.supplier_id)
-        .eq('active', true)
-      if (aErr) return res.status(500).json({ error: aErr.message })
+      // Fetch prices WITHOUT a PostgREST FK join — avoids 500s when the FK
+      // isn't in PostgREST's schema cache. We then do a separate products
+      // lookup by ID which is a plain .in() and never requires a FK.
+      const [activeRes, hiddenRes] = await Promise.all([
+        supabaseAdmin.from('supplier_prices')
+          .select('product_id, price_php, stock_qty, unit, updated_at')
+          .eq('supplier_id', orgMember.supplier_id).eq('active', true),
+        supabaseAdmin.from('supplier_prices')
+          .select('product_id, price_php, stock_qty, unit, updated_at')
+          .eq('supplier_id', orgMember.supplier_id).eq('active', false),
+      ])
+      if (activeRes.error) return res.status(500).json({ error: activeRes.error.message })
+      if (hiddenRes.error) return res.status(500).json({ error: hiddenRes.error.message })
 
-      const { data: hidden, error: hErr } = await supabaseAdmin
-        .from('supplier_prices')
-        .select('product_id, price_php, stock_qty, unit, updated_at, products(id, canonical_name, default_unit, category_id)')
-        .eq('supplier_id', orgMember.supplier_id)
-        .eq('active', false)
-      if (hErr) return res.status(500).json({ error: hErr.message })
+      // Enrich with product details so the frontend can build idToPid without
+      // depending on the client-side products query (which may be RLS-blocked).
+      const allPrices = [...(activeRes.data || []), ...(hiddenRes.data || [])]
+      const productIds = [...new Set(allPrices.map(p => p.product_id).filter(Boolean))]
+      let productMap = {}
+      if (productIds.length > 0) {
+        const { data: prods } = await supabaseAdmin
+          .from('products')
+          .select('id, canonical_name, default_unit, category_id')
+          .in('id', productIds)
+        if (prods) prods.forEach(p => { productMap[p.id] = p })
+      }
 
-      return res.status(200).json({ supplier_id: orgMember.supplier_id, active: active || [], hidden: hidden || [] })
+      const enrich = rows => (rows || []).map(r => ({ ...r, products: productMap[r.product_id] || null }))
+      return res.status(200).json({
+        supplier_id: orgMember.supplier_id,
+        active: enrich(activeRes.data),
+        hidden: enrich(hiddenRes.data),
+      })
     }
 
     // ── 1) Supplier self lookup (own record regardless of approval state) ─
