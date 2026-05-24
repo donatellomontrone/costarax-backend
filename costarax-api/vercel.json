@@ -13,6 +13,10 @@
   },
   "rewrites": [
     {
+      "source": "/api/me",
+      "destination": "/api/search?__route=me"
+    },
+    {
       "source": "/api/admin/:seg1/:seg2/:seg3",
       "destination": "/api/admin/:seg1?_id=:seg2&_action=:seg3"
     },

@@ -1,9 +1,18 @@
 const Anthropic = require('@anthropic-ai/sdk');
-const { verifyToken } = require('../lib/supabase-admin');
+const { supabaseAdmin, verifyToken, requireAuth } = require('../lib/supabase-admin');
 const { applyCors } = require('../lib/cors');
+const { resolveUserContext } = require('../lib/user-context');
 
 module.exports = async (req, res) => {
-  if (applyCors(req, res, { methods: 'POST,OPTIONS' })) return;
+  if (applyCors(req, res, { methods: 'GET,POST,OPTIONS' })) return;
+
+  if (req.method === 'GET' && req.query?.__route === 'me') {
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const ctx = await resolveUserContext(supabaseAdmin, auth.user.id, auth.user.email);
+    return res.status(200).json(ctx);
+  }
+
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const token = req.headers.authorization?.replace('Bearer ', '');
