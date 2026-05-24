@@ -109,6 +109,10 @@ async function resolveBusinessMembership(db, userId, authEmail = null) {
 
 module.exports = {
   normalizeUiRole,
+  chooseSupplierMembership,
+  chooseBusinessMembership,
+  scoreSupplierMembership,
+  scoreBusinessMembership,
   resolveUserContext,
   resolveSupplierMembership,
   resolveBusinessMembership,

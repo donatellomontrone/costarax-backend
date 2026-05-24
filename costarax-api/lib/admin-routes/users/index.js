@@ -3,6 +3,7 @@ const { supabaseAdmin, requireAdmin, requireSuperAdmin } = require('../../supaba
 const { sendEmail, adminCreatedAccountEmail, adminRoleChangedEmail } = require('../../email')
 const { enforce } = require('../../rate-limit')
 const { logAdminAction } = require('../../admin-audit')
+const { replaceSupplierLink } = require('../../membership-admin')
 
 module.exports = async (req, res) => {
   const auth = await requireAdmin(req, res)
@@ -130,23 +131,26 @@ module.exports = async (req, res) => {
       if (canonicalEmail) {
         await supabaseAdmin.from('profiles').upsert({ id, email: canonicalEmail }, { onConflict: 'id' }).catch(() => {})
       }
-      // Remove any existing supplier link for this user
-      await supabaseAdmin.from('organization_members').delete().eq('user_id', id).not('supplier_id', 'is', null)
-      if (supplier_id) {
-        // Supplier access is currently single-owner in the admin flow: when an
-        // admin re-links a supplier to a new email, detach any previous user(s)
-        // from that supplier first so login resolution and admin UI stay sane.
-        await supabaseAdmin.from('organization_members').delete().eq('supplier_id', supplier_id)
-        const { error: omErr } = await supabaseAdmin.from('organization_members').insert({ user_id: id, supplier_id })
-        if (omErr) return res.status(500).json({ error: omErr.message })
+      let linkResult
+      try {
+        linkResult = await replaceSupplierLink(supabaseAdmin, { userId: id, supplierId: supplier_id || null })
+      } catch (e) {
+        return res.status(500).json({ error: e.message })
       }
       await logAdminAction(supabaseAdmin, {
         admin_id: auth.user.id,
         action_type: supplier_id ? 'link_supplier_user' : 'unlink_supplier_user',
         target_id: id,
-        notes: supplier_id ? `linked supplier ${supplier_id}` : 'removed supplier link'
+        notes: supplier_id
+          ? `linked supplier ${supplier_id}${linkResult?.displaced_user_ids?.length ? ` · displaced users ${linkResult.displaced_user_ids.join(', ')}` : ''}`
+          : 'removed supplier link'
       })
-      return res.status(200).json({ message: supplier_id ? 'Supplier linked' : 'Supplier unlinked' })
+      return res.status(200).json({
+        message: supplier_id ? 'Supplier linked' : 'Supplier unlinked',
+        linked_supplier_id: linkResult?.supplier_id || null,
+        displaced_user_ids: linkResult?.displaced_user_ids || [],
+        removed_supplier_ids: linkResult?.removed_supplier_ids || [],
+      })
     }
 
     // Create a new user
@@ -186,11 +190,11 @@ module.exports = async (req, res) => {
 
       // Link supplier user to their organisation so login resolves correctly
       if (dbRole === 'supplier' && supplier_id) {
-        const { error: omErr } = await supabaseAdmin.from('organization_members').insert({
-          user_id: created.user.id,
-          supplier_id,
-        })
-        if (omErr) console.error('[create-user] org_member insert failed:', omErr.message)
+        try {
+          await replaceSupplierLink(supabaseAdmin, { userId: created.user.id, supplierId: supplier_id })
+        } catch (e) {
+          console.error('[create-user] org_member insert failed:', e.message)
+        }
       }
 
       // Generate a one-time set-password link and notify the new user.
