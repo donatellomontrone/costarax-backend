@@ -6,7 +6,39 @@ function cloneRow(row) {
   }
 }
 
-async function replaceSupplierLink(db, { userId, supplierId = null }) {
+function normalizeLinkResult(row, userId) {
+  return {
+    user_id: row?.user_id || userId,
+    supplier_id: row?.supplier_id || null,
+    displaced_user_ids: Array.isArray(row?.displaced_user_ids) ? row.displaced_user_ids.filter(Boolean) : [],
+    removed_supplier_ids: Array.isArray(row?.removed_supplier_ids) ? row.removed_supplier_ids.filter(Boolean) : [],
+  }
+}
+
+async function replaceSupplierLinkViaRpc(db, { userId, supplierId = null }) {
+  const { data, error } = await db.rpc('admin_replace_supplier_link', {
+    p_user_id: userId,
+    p_supplier_id: supplierId || null,
+  })
+
+  if (error) {
+    const msg = String(error.message || '')
+    const code = String(error.code || '')
+    const missingFn =
+      code === '42883' ||
+      /admin_replace_supplier_link/i.test(msg) ||
+      /function .* does not exist/i.test(msg)
+    if (missingFn) return null
+    throw new Error(error.message)
+  }
+
+  const row = Array.isArray(data) ? data[0] : data
+  return normalizeLinkResult(row, userId)
+}
+
+async function replaceSupplierLinkLegacy(db, { userId, supplierId = null }) {
+  // App-layer fallback for environments where the SQL function has not been
+  // applied yet. Keep behavior identical to the pre-RPC implementation.
   const { data: currentRows, error: currentErr } = await db
     .from('organization_members')
     .select('user_id, supplier_id, business_id')
@@ -69,14 +101,23 @@ async function replaceSupplierLink(db, { userId, supplierId = null }) {
     throw new Error('Supplier link verification failed')
   }
 
-  return {
+  return normalizeLinkResult({
     user_id: userId,
     supplier_id: linkedSupplierId,
     displaced_user_ids: previousSupplierRows.map(row => row.user_id),
     removed_supplier_ids: previousUserSupplierRows.map(row => row.supplier_id).filter(Boolean),
-  }
+  }, userId)
+}
+
+async function replaceSupplierLink(db, { userId, supplierId = null }) {
+  const rpcResult = await replaceSupplierLinkViaRpc(db, { userId, supplierId })
+  if (rpcResult) return rpcResult
+  return replaceSupplierLinkLegacy(db, { userId, supplierId })
 }
 
 module.exports = {
+  normalizeLinkResult,
   replaceSupplierLink,
+  replaceSupplierLinkLegacy,
+  replaceSupplierLinkViaRpc,
 }
