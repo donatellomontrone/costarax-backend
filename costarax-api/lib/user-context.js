@@ -97,9 +97,47 @@ async function resolveUserContext(db, userId, authEmail = null) {
   }
 }
 
+function scoreLooseSupplierCandidate(row) {
+  let score = 0
+  if (row?.status === 'approved') score += 100
+  if (row?.active) score += 50
+  if (row?.status === 'pending') score += 10
+  if (row?.status === 'rejected') score -= 100
+  return score
+}
+
 async function resolveSupplierMembership(db, userId, authEmail = null) {
   const ctx = await resolveUserContext(db, userId, authEmail)
-  return ctx.supplier
+  if (ctx.supplier?.supplier_id) return ctx.supplier
+
+  const email = String(authEmail || ctx.email || '').trim().toLowerCase()
+  if (!email) return null
+  if (ctx.normalized_profile_role !== 'supplier') return null
+
+  const { data: supplierRows, error } = await db
+    .from('suppliers')
+    .select('id, name, status, active, category, city, region, contact_email')
+    .ilike('contact_email', email)
+
+  if (error) {
+    console.warn('[user-context] supplier email fallback failed:', error.message)
+    return null
+  }
+  if (!supplierRows?.length) return null
+
+  const best = [...supplierRows].sort((a, b) => scoreLooseSupplierCandidate(b) - scoreLooseSupplierCandidate(a))[0]
+  if (!best?.id) return null
+
+  return {
+    supplier_id: best.id,
+    name: best.name || null,
+    status: best.status || null,
+    active: best.active ?? null,
+    category: best.category || null,
+    city: best.city || null,
+    region: best.region || null,
+    resolved_via: 'contact_email_fallback',
+  }
 }
 
 async function resolveBusinessMembership(db, userId, authEmail = null) {
@@ -114,6 +152,7 @@ module.exports = {
   scoreSupplierMembership,
   scoreBusinessMembership,
   resolveUserContext,
+  scoreLooseSupplierCandidate,
   resolveSupplierMembership,
   resolveBusinessMembership,
 }
