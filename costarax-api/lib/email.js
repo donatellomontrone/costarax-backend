@@ -1,6 +1,14 @@
 const nodemailer = require('nodemailer')
 
 const FROM = process.env.EMAIL_FROM || 'Costarax <onboarding@resend.dev>'
+const EMAIL_TIMEOUT_MS = parseInt(process.env.EMAIL_TIMEOUT_MS || '8000', 10)
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
+  ])
+}
 
 async function sendEmail({ to, subject, html }) {
   // Prefer SMTP (Brevo) when EMAIL_HOST is configured
@@ -10,9 +18,16 @@ async function sendEmail({ to, subject, html }) {
         host: process.env.EMAIL_HOST,
         port: parseInt(process.env.EMAIL_PORT || '587'),
         secure: process.env.EMAIL_PORT === '465',
-        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+        connectionTimeout: EMAIL_TIMEOUT_MS,
+        greetingTimeout: EMAIL_TIMEOUT_MS,
+        socketTimeout: EMAIL_TIMEOUT_MS,
       })
-      await transporter.sendMail({ from: FROM, to, subject, html })
+      await withTimeout(
+        transporter.sendMail({ from: FROM, to, subject, html }),
+        EMAIL_TIMEOUT_MS,
+        'SMTP sendMail'
+      )
       return { ok: true }
     } catch (err) { console.error('[SMTP error]', err.message); return { ok: false, error: err.message } }
   }
@@ -22,7 +37,11 @@ async function sendEmail({ to, subject, html }) {
     try {
       const { Resend } = require('resend')
       const resend = new Resend(process.env.RESEND_API_KEY)
-      const { error } = await resend.emails.send({ from: FROM, to, subject, html })
+      const { error } = await withTimeout(
+        resend.emails.send({ from: FROM, to, subject, html }),
+        EMAIL_TIMEOUT_MS,
+        'Resend emails.send'
+      )
       if (error) { console.error('[Resend error]', error); return { ok: false, error: error.message } }
       return { ok: true }
     } catch (err) { console.error('[Resend error]', err.message); return { ok: false, error: err.message } }

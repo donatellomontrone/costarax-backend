@@ -140,18 +140,21 @@ module.exports = async (req, res) => {
       await supabaseAdmin.from('profiles').update({ email: newEmail }).eq('id', id).catch(() => {})
     }
 
-    // Notify user of role change (after all updates so we use the freshest email).
-    let roleEmailSent = false
+    // Notify user of role change, but do not block the admin UI on email delivery.
+    let roleEmailQueued = false
     if (roleChanged) {
-      try {
-        const { data: u } = await supabaseAdmin.auth.admin.getUserById(id)
-        const targetEmail = u?.user?.email
-        if (targetEmail) {
+      roleEmailQueued = true
+      ;(async () => {
+        try {
+          const { data: u } = await supabaseAdmin.auth.admin.getUserById(id)
+          const targetEmail = u?.user?.email
+          if (!targetEmail) return
           const tpl = adminRoleChangedEmail({ contactEmail: targetEmail, oldRole: roleChanged.oldRole, newRole: roleChanged.newRole })
-          const r = await sendEmail({ to: targetEmail, ...tpl })
-          roleEmailSent = r?.ok === true
+          await sendEmail({ to: targetEmail, ...tpl })
+        } catch (e) {
+          console.error('[patch-user] role-change email failed', e.message)
         }
-      } catch (e) { console.error('[patch-user] role-change email failed', e.message) }
+      })()
     }
 
     await logAdminAction(supabaseAdmin, {
@@ -164,7 +167,7 @@ module.exports = async (req, res) => {
       ].filter(Boolean).join(' · ')
     })
 
-    return res.status(200).json({ message: 'User updated', roleChanged: !!roleChanged, roleEmailSent })
+    return res.status(200).json({ message: 'User updated', roleChanged: !!roleChanged, roleEmailQueued })
   }
 
   // ── POST — create user OR send password reset email ──────────────────────
