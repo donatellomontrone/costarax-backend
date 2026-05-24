@@ -17,6 +17,245 @@ module.exports = async (req, res) => {
   try {
     if (applyCors(req, res, { methods: 'GET,POST,PATCH,OPTIONS' })) return
 
+    const route = req.query?.__route
+
+    if (req.method === 'GET' && (route === 'my-prices' || route === 'products-state')) {
+      const auth = await requireAuth(req, res)
+      if (!auth) return
+
+      const orgMember = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
+      if (!orgMember?.supplier_id) return res.status(404).json({ error: 'No supplier linked' })
+
+      const state = await buildSupplierProductsState(orgMember.supplier_id)
+      return res.status(200).json(state)
+    }
+
+    if (req.method === 'POST' && route === 'product-action') {
+      const auth = await requireAuth(req, res)
+      if (!auth) return
+      if (!['supplier', 'admin', 'super_admin'].includes(auth.profile.role)) {
+        return res.status(403).json({ error: 'Supplier access required' })
+      }
+
+      const orgMember = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
+      if (!orgMember?.supplier_id) {
+        return res.status(403).json({ error: 'No supplier account linked to this user' })
+      }
+
+      const supplierId = orgMember.supplier_id
+      const body = req.body || {}
+      const action = body.action
+
+      if (!action) return res.status(400).json({ error: 'Missing product action' })
+
+      if (action === 'set_visibility') {
+        const productIds = normalizeUuidArray(body.product_ids || body.product_id)
+        const makeActive = body.make_active === true
+        if (!productIds.length) return res.status(400).json({ error: 'No product selected' })
+
+        const { error } = await supabaseAdmin
+          .from('supplier_prices')
+          .update({ active: makeActive, updated_at: new Date().toISOString() })
+          .eq('supplier_id', supplierId)
+          .in('product_id', productIds)
+        if (error) return res.status(500).json({ error: error.message })
+
+        const state = await buildSupplierProductsState(supplierId)
+        return res.status(200).json({
+          message: makeActive ? `Made ${productIds.length} product${productIds.length > 1 ? 's' : ''} visible`
+                              : `Hidden ${productIds.length} product${productIds.length > 1 ? 's' : ''}`,
+          state,
+        })
+      }
+
+      if (action === 'delete_products') {
+        const productIds = normalizeUuidArray(body.product_ids || body.product_id)
+        if (!productIds.length) return res.status(400).json({ error: 'No product selected' })
+
+        const { error } = await supabaseAdmin
+          .from('supplier_prices')
+          .delete()
+          .eq('supplier_id', supplierId)
+          .in('product_id', productIds)
+        if (error) return res.status(500).json({ error: error.message })
+
+        const state = await buildSupplierProductsState(supplierId)
+        return res.status(200).json({
+          message: `Deleted ${productIds.length} product${productIds.length > 1 ? 's' : ''}`,
+          state,
+        })
+      }
+
+      if (action === 'update_stock') {
+        const productId = body.product_id
+        const stockQty = body.stock_qty === '' || body.stock_qty === undefined ? null : body.stock_qty
+        if (!isUuid(productId)) return res.status(400).json({ error: 'Invalid product id' })
+        if (stockQty !== null && (!Number.isFinite(Number(stockQty)) || Number(stockQty) < 0)) {
+          return res.status(400).json({ error: 'Stock must be a non-negative number or empty' })
+        }
+
+        const { error } = await supabaseAdmin
+          .from('supplier_prices')
+          .update({ stock_qty: stockQty === null ? null : Number(stockQty), updated_at: new Date().toISOString() })
+          .eq('supplier_id', supplierId)
+          .eq('product_id', productId)
+        if (error) return res.status(500).json({ error: error.message })
+
+        const state = await buildSupplierProductsState(supplierId)
+        return res.status(200).json({ message: 'Stock updated', state })
+      }
+
+      if (action === 'add_single_item') {
+        const name = String(body.name || '').trim()
+        const unit = String(body.unit || '').trim()
+        const category = String(body.category || 'dry').trim()
+        const price = Number(body.price)
+        const stockQty = body.stock_qty === '' || body.stock_qty === undefined ? null : Number(body.stock_qty)
+
+        if (!name) return res.status(400).json({ error: 'Product name is required' })
+        if (!unit) return res.status(400).json({ error: 'Unit is required' })
+        if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ error: 'Price must be greater than 0' })
+        if (stockQty !== null && (!Number.isFinite(stockQty) || stockQty < 0)) {
+          return res.status(400).json({ error: 'Stock must be a non-negative number or empty' })
+        }
+
+        let productId = null
+        const { data: existingProduct } = await supabaseAdmin
+          .from('products')
+          .select('id')
+          .ilike('canonical_name', name)
+          .limit(1)
+          .maybeSingle()
+
+        if (existingProduct?.id) {
+          productId = existingProduct.id
+        } else {
+          const { data: createdProduct, error: createErr } = await supabaseAdmin
+            .from('products')
+            .insert({ canonical_name: name, default_unit: unit, category_id: category, active: true })
+            .select('id')
+            .single()
+          if (createErr) return res.status(500).json({ error: createErr.message })
+          productId = createdProduct.id
+        }
+
+        await supabaseAdmin
+          .from('supplier_prices')
+          .delete()
+          .eq('supplier_id', supplierId)
+          .eq('product_id', productId)
+
+        const { error: insertErr } = await supabaseAdmin
+          .from('supplier_prices')
+          .insert({
+            supplier_id: supplierId,
+            product_id: productId,
+            price_php: price,
+            unit,
+            stock_qty: stockQty,
+            active: true,
+            updated_at: new Date().toISOString(),
+          })
+        if (insertErr) return res.status(500).json({ error: insertErr.message })
+
+        const state = await buildSupplierProductsState(supplierId)
+        return res.status(200).json({ message: `Added "${name}"`, state })
+      }
+
+      if (action === 'edit_product') {
+        const productId = body.product_id
+        const newName = String(body.name || '').trim()
+        const newUnit = String(body.unit || '').trim()
+        const newPrice = Number(body.price)
+
+        if (!isUuid(productId)) return res.status(400).json({ error: 'Invalid product id' })
+        if (!newName) return res.status(400).json({ error: 'Product name is required' })
+        if (!newUnit) return res.status(400).json({ error: 'Unit is required' })
+        if (!Number.isFinite(newPrice) || newPrice <= 0) return res.status(400).json({ error: 'Price must be greater than 0' })
+
+        const { data: existingPrice, error: priceFetchErr } = await supabaseAdmin
+          .from('supplier_prices')
+          .select('supplier_id, product_id, stock_qty, active')
+          .eq('supplier_id', supplierId)
+          .eq('product_id', productId)
+          .limit(1)
+          .maybeSingle()
+        if (priceFetchErr) return res.status(500).json({ error: priceFetchErr.message })
+        if (!existingPrice) return res.status(404).json({ error: 'Product not found in your price list' })
+
+        const { data: sourceProduct, error: prodErr } = await supabaseAdmin
+          .from('products')
+          .select('id, canonical_name, default_unit, category_id, image_url')
+          .eq('id', productId)
+          .maybeSingle()
+        if (prodErr) return res.status(500).json({ error: prodErr.message })
+
+        const { count: supplierCount, error: countErr } = await supabaseAdmin
+          .from('supplier_prices')
+          .select('supplier_id', { count: 'exact', head: true })
+          .eq('product_id', productId)
+        if (countErr) return res.status(500).json({ error: countErr.message })
+
+        let targetProductId = productId
+        if ((supplierCount || 0) > 1 && sourceProduct) {
+          const { data: clonedProduct, error: cloneErr } = await supabaseAdmin
+            .from('products')
+            .insert({
+              canonical_name: newName,
+              default_unit: newUnit,
+              category_id: sourceProduct.category_id,
+              image_url: sourceProduct.image_url || null,
+              active: true,
+            })
+            .select('id')
+            .single()
+          if (cloneErr) return res.status(500).json({ error: cloneErr.message })
+          targetProductId = clonedProduct.id
+
+          await supabaseAdmin
+            .from('supplier_prices')
+            .delete()
+            .eq('supplier_id', supplierId)
+            .eq('product_id', productId)
+
+          const { error: insertErr } = await supabaseAdmin
+            .from('supplier_prices')
+            .insert({
+              supplier_id: supplierId,
+              product_id: targetProductId,
+              price_php: newPrice,
+              unit: newUnit,
+              stock_qty: existingPrice.stock_qty,
+              active: existingPrice.active,
+              updated_at: new Date().toISOString(),
+            })
+          if (insertErr) return res.status(500).json({ error: insertErr.message })
+        } else {
+          const { error: updateProdErr } = await supabaseAdmin
+            .from('products')
+            .update({ canonical_name: newName, default_unit: newUnit })
+            .eq('id', productId)
+          if (updateProdErr) return res.status(500).json({ error: updateProdErr.message })
+
+          const { error: updatePriceErr } = await supabaseAdmin
+            .from('supplier_prices')
+            .update({ price_php: newPrice, unit: newUnit, updated_at: new Date().toISOString() })
+            .eq('supplier_id', supplierId)
+            .eq('product_id', productId)
+          if (updatePriceErr) return res.status(500).json({ error: updatePriceErr.message })
+        }
+
+        const state = await buildSupplierProductsState(supplierId)
+        return res.status(200).json({
+          message: 'Product updated',
+          state,
+          product_id: targetProductId,
+        })
+      }
+
+      return res.status(400).json({ error: `Unknown product action: ${action}` })
+    }
+
     // ── PATCH /api/suppliers — supplier self-update ───────────────────────
     if (req.method === 'PATCH') {
       const auth = await requireAuth(req, res)
@@ -85,45 +324,6 @@ module.exports = async (req, res) => {
     const token = req.headers.authorization?.replace('Bearer ', '')
     const user = await verifyToken(token)
     if (!user) return res.status(401).json({ error: 'Unauthorized' })
-
-    if (req.query?.__route === 'my-prices') {
-      const orgMember = await resolveSupplierMembership(supabaseAdmin, user.id, user.email)
-      if (!orgMember?.supplier_id) return res.status(404).json({ error: 'No supplier linked' })
-
-      // Fetch prices WITHOUT a PostgREST FK join — avoids 500s when the FK
-      // isn't in PostgREST's schema cache. We then do a separate products
-      // lookup by ID which is a plain .in() and never requires a FK.
-      const [activeRes, hiddenRes] = await Promise.all([
-        supabaseAdmin.from('supplier_prices')
-          .select('product_id, price_php, stock_qty, unit, updated_at')
-          .eq('supplier_id', orgMember.supplier_id).eq('active', true),
-        supabaseAdmin.from('supplier_prices')
-          .select('product_id, price_php, stock_qty, unit, updated_at')
-          .eq('supplier_id', orgMember.supplier_id).eq('active', false),
-      ])
-      if (activeRes.error) return res.status(500).json({ error: activeRes.error.message })
-      if (hiddenRes.error) return res.status(500).json({ error: hiddenRes.error.message })
-
-      // Enrich with product details so the frontend can build idToPid without
-      // depending on the client-side products query (which may be RLS-blocked).
-      const allPrices = [...(activeRes.data || []), ...(hiddenRes.data || [])]
-      const productIds = [...new Set(allPrices.map(p => p.product_id).filter(Boolean))]
-      let productMap = {}
-      if (productIds.length > 0) {
-        const { data: prods } = await supabaseAdmin
-          .from('products')
-          .select('id, canonical_name, default_unit, category_id')
-          .in('id', productIds)
-        if (prods) prods.forEach(p => { productMap[p.id] = p })
-      }
-
-      const enrich = rows => (rows || []).map(r => ({ ...r, products: productMap[r.product_id] || null }))
-      return res.status(200).json({
-        supplier_id: orgMember.supplier_id,
-        active: enrich(activeRes.data),
-        hidden: enrich(hiddenRes.data),
-      })
-    }
 
     // ── 1) Supplier self lookup (own record regardless of approval state) ─
     if (req.query?.mine === '1') {
@@ -300,4 +500,69 @@ async function respond(res, suppliers) {
 
   res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=120')
   return res.status(200).json(result)
+}
+
+async function buildSupplierProductsState(supplierId) {
+  const { data: priceRows, error: priceErr } = await supabaseAdmin
+    .from('supplier_prices')
+    .select('product_id, price_php, stock_qty, unit, updated_at, active')
+    .eq('supplier_id', supplierId)
+
+  if (priceErr) throw new Error(priceErr.message)
+
+  const productIds = [...new Set((priceRows || []).map(p => p.product_id).filter(Boolean))]
+  let productMap = {}
+  if (productIds.length > 0) {
+    const { data: prods, error: prodErr } = await supabaseAdmin
+      .from('products')
+      .select('id, canonical_name, default_unit, category_id, image_url')
+      .in('id', productIds)
+    if (prodErr) throw new Error(prodErr.message)
+    ;(prods || []).forEach(p => { productMap[p.id] = p })
+  }
+
+  const enrich = rows => (rows || []).map(r => ({ ...r, products: productMap[r.product_id] || null }))
+  const uploadHistory = await loadUploadHistoryForSupplier(supplierId)
+
+  return {
+    supplier_id: supplierId,
+    active: enrich((priceRows || []).filter(r => r.active !== false)),
+    hidden: enrich((priceRows || []).filter(r => r.active === false)),
+    upload_history: uploadHistory,
+  }
+}
+
+async function loadUploadHistoryForSupplier(supplierId) {
+  const { data, error } = await supabaseAdmin
+    .from('price_list_uploads')
+    .select('id,file_name,status,ai_summary,created_at')
+    .eq('supplier_id', supplierId)
+    .order('created_at', { ascending: false })
+    .limit(20)
+
+  if (error) throw new Error(error.message)
+
+  return (data || []).map(u => {
+    let summary = {}
+    try { summary = JSON.parse(u.ai_summary || '{}') } catch (_) {}
+    return {
+      id: u.id,
+      file_name: u.file_name || 'price-list',
+      status: u.status || 'uploaded',
+      created_at: u.created_at,
+      products_matched: summary.matched ?? null,
+      products_extracted: summary.extracted ?? null,
+      anomaly_count: summary.anomalies ?? 0,
+      anomaly_details: summary.anomaly_details ?? [],
+    }
+  })
+}
+
+function isUuid(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
+
+function normalizeUuidArray(input) {
+  const items = Array.isArray(input) ? input : [input]
+  return [...new Set(items.filter(isUuid))]
 }
