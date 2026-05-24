@@ -5,6 +5,71 @@ const { enforce } = require('../../rate-limit')
 const { logAdminAction } = require('../../admin-audit')
 const { replaceSupplierLink } = require('../../membership-admin')
 
+async function handleUserUpdate(auth, body, res) {
+  const { id, role, email } = body || {}
+  if (!id) return res.status(400).json({ error: 'User id is required' })
+
+  // Frontend uses 'business' label; DB enum uses 'buyer'.
+  const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier', 'super_admin']
+  const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier', super_admin: 'super_admin' }
+
+  let roleChanged = null
+  if (role !== undefined) {
+    if (!VALID_UI_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: admin, business, supplier, super_admin` })
+    const dbRole = TO_DB_ROLE[role]
+
+    const { data: before } = await supabaseAdmin.from('profiles').select('role').eq('id', id).single()
+    const oldRole = before?.role || null
+
+    if ((dbRole === 'super_admin' || oldRole === 'super_admin') && auth.profile.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only a super-admin can change the super_admin role.' })
+    }
+    if (oldRole === 'super_admin' && id === auth.user.id) {
+      return res.status(400).json({ error: 'Super-admins cannot demote themselves. Ask another super-admin.' })
+    }
+
+    const { error } = await supabaseAdmin.from('profiles').update({ role: dbRole }).eq('id', id)
+    if (error) return res.status(500).json({ error: error.message })
+
+    if (oldRole !== dbRole) roleChanged = { oldRole, newRole: dbRole }
+  }
+
+  if (email?.trim()) {
+    const newEmail = email.trim().toLowerCase()
+    const { error } = await supabaseAdmin.auth.admin.updateUserById(id, { email: newEmail })
+    if (error) return res.status(500).json({ error: error.message })
+    await supabaseAdmin.from('profiles').update({ email: newEmail }).eq('id', id).catch(() => {})
+  }
+
+  let roleEmailQueued = false
+  if (roleChanged) {
+    roleEmailQueued = true
+    ;(async () => {
+      try {
+        const { data: u } = await supabaseAdmin.auth.admin.getUserById(id)
+        const targetEmail = u?.user?.email
+        if (!targetEmail) return
+        const tpl = adminRoleChangedEmail({ contactEmail: targetEmail, oldRole: roleChanged.oldRole, newRole: roleChanged.newRole })
+        await sendEmail({ to: targetEmail, ...tpl })
+      } catch (e) {
+        console.error('[patch-user] role-change email failed', e.message)
+      }
+    })()
+  }
+
+  await logAdminAction(supabaseAdmin, {
+    admin_id: auth.user.id,
+    action_type: 'edit_user',
+    target_id: id,
+    notes: [
+      roleChanged ? `role ${roleChanged.oldRole || '—'} -> ${roleChanged.newRole}` : null,
+      email?.trim() ? `email -> ${email.trim().toLowerCase()}` : null,
+    ].filter(Boolean).join(' · ')
+  })
+
+  return res.status(200).json({ message: 'User updated', roleChanged: !!roleChanged, roleEmailQueued })
+}
+
 module.exports = async (req, res) => {
   const auth = await requireAdmin(req, res)
   if (!auth) return
@@ -102,77 +167,16 @@ module.exports = async (req, res) => {
 
   // ── PATCH — update role and/or email ─────────────────────────────────────
   if (req.method === 'PATCH') {
-    const { id, role, email } = req.body || {}
-    if (!id) return res.status(400).json({ error: 'User id is required' })
-
-    // Frontend uses 'business' label; DB enum uses 'buyer'.
-    const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier', 'super_admin']
-    const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier', super_admin: 'super_admin' }
-
-    let roleChanged = null  // { oldRole, newRole } if role actually changed
-    if (role !== undefined) {
-      if (!VALID_UI_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: admin, business, supplier, super_admin` })
-      const dbRole = TO_DB_ROLE[role]
-
-      // Read current role first to detect a real change and notify the user.
-      const { data: before } = await supabaseAdmin.from('profiles').select('role').eq('id', id).single()
-      const oldRole = before?.role || null
-
-      // Only super-admins can grant or revoke super_admin, and they cannot demote themselves.
-      if ((dbRole === 'super_admin' || oldRole === 'super_admin') && auth.profile.role !== 'super_admin') {
-        return res.status(403).json({ error: 'Only a super-admin can change the super_admin role.' })
-      }
-      if (oldRole === 'super_admin' && id === auth.user.id) {
-        return res.status(400).json({ error: 'Super-admins cannot demote themselves. Ask another super-admin.' })
-      }
-
-      const { error } = await supabaseAdmin.from('profiles').update({ role: dbRole }).eq('id', id)
-      if (error) return res.status(500).json({ error: error.message })
-
-      if (oldRole !== dbRole) roleChanged = { oldRole, newRole: dbRole }
-    }
-
-    if (email?.trim()) {
-      const newEmail = email.trim().toLowerCase()
-      const { error } = await supabaseAdmin.auth.admin.updateUserById(id, { email: newEmail })
-      if (error) return res.status(500).json({ error: error.message })
-      // Keep profiles table in sync
-      await supabaseAdmin.from('profiles').update({ email: newEmail }).eq('id', id).catch(() => {})
-    }
-
-    // Notify user of role change, but do not block the admin UI on email delivery.
-    let roleEmailQueued = false
-    if (roleChanged) {
-      roleEmailQueued = true
-      ;(async () => {
-        try {
-          const { data: u } = await supabaseAdmin.auth.admin.getUserById(id)
-          const targetEmail = u?.user?.email
-          if (!targetEmail) return
-          const tpl = adminRoleChangedEmail({ contactEmail: targetEmail, oldRole: roleChanged.oldRole, newRole: roleChanged.newRole })
-          await sendEmail({ to: targetEmail, ...tpl })
-        } catch (e) {
-          console.error('[patch-user] role-change email failed', e.message)
-        }
-      })()
-    }
-
-    await logAdminAction(supabaseAdmin, {
-      admin_id: auth.user.id,
-      action_type: 'edit_user',
-      target_id: id,
-      notes: [
-        roleChanged ? `role ${roleChanged.oldRole || '—'} -> ${roleChanged.newRole}` : null,
-        email?.trim() ? `email -> ${email.trim().toLowerCase()}` : null,
-      ].filter(Boolean).join(' · ')
-    })
-
-    return res.status(200).json({ message: 'User updated', roleChanged: !!roleChanged, roleEmailQueued })
+    return handleUserUpdate(auth, req.body, res)
   }
 
   // ── POST — create user OR send password reset email ──────────────────────
   if (req.method === 'POST') {
     const { id, email, action, password, role, supplier_id } = req.body || {}
+
+    if (action === 'edit_user') {
+      return handleUserUpdate(auth, req.body, res)
+    }
 
     // Link (or unlink) a user to a supplier organisation
     if (action === 'link_supplier') {
