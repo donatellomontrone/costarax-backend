@@ -38,7 +38,7 @@ async function handleUserUpdate(auth, body, res) {
     const newEmail = email.trim().toLowerCase()
     const { error } = await supabaseAdmin.auth.admin.updateUserById(id, { email: newEmail })
     if (error) return res.status(500).json({ error: error.message })
-    await supabaseAdmin.from('profiles').update({ email: newEmail }).eq('id', id).catch(() => {})
+    try { await supabaseAdmin.from('profiles').update({ email: newEmail }).eq('id', id) } catch (_) {}
   }
 
   let roleEmailQueued = false
@@ -184,7 +184,7 @@ module.exports = async (req, res) => {
       const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id)
       const canonicalEmail = authUser?.user?.email?.trim()?.toLowerCase?.() || null
       if (canonicalEmail) {
-        await supabaseAdmin.from('profiles').upsert({ id, email: canonicalEmail }, { onConflict: 'id' }).catch(() => {})
+        try { await supabaseAdmin.from('profiles').upsert({ id, email: canonicalEmail }, { onConflict: 'id' }) } catch (_) {}
       }
       let linkResult
       try {
@@ -364,17 +364,19 @@ module.exports = async (req, res) => {
     }
 
     // Best-effort cleanup of org_members; auth user delete cascades to profiles.
-    await supabaseAdmin.from('organization_members').delete().eq('user_id', id).catch(() => {})
+    try { await supabaseAdmin.from('organization_members').delete().eq('user_id', id) } catch (_) {}
 
     const { error } = await supabaseAdmin.auth.admin.deleteUser(id)
     if (error) return res.status(500).json({ error: error.message })
 
-    await supabaseAdmin.from('admin_actions').insert({
-      admin_id: auth.user.id,
-      action_type: 'delete_user',
-      target_id: id,
-      notes: `Deleted user: ${target?.email || id}`,
-    }).catch(() => {})
+    try {
+      await supabaseAdmin.from('admin_actions').insert({
+        admin_id: auth.user.id,
+        action_type: 'delete_user',
+        target_id: id,
+        notes: `Deleted user: ${target?.email || id}`,
+      })
+    } catch (_) {}
 
     return res.status(200).json({ message: 'User deleted', id })
   }

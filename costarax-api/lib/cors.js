@@ -8,6 +8,7 @@ const ALLOWED = new Set([
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',
+  'null',
 ])
 
 function applyCors(req, res, { methods = 'GET,POST,PATCH,DELETE,OPTIONS' } = {}) {
