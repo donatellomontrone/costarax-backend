@@ -1,6 +1,7 @@
 const suppliersIndex = require('../../lib/admin-routes/suppliers')
 const suppliersId = require('../../lib/admin-routes/suppliers-id')
 const accessRequestsAction = require('../../lib/admin-routes/access-requests-action')
+const businessesIndex = require('../../lib/admin-routes/businesses')
 const businessesAction = require('../../lib/admin-routes/businesses-action')
 const paymentsIndex = require('../../lib/admin-routes/payments')
 const usersIndex = require('../../lib/admin-routes/users')
@@ -42,6 +43,10 @@ module.exports = async (req, res) => {
     req.query.id = rId
     req.query.action = rAction
     return businessesAction(req, res)
+  }
+
+  if (resource === 'businesses' && path.length === 1 && !rId) {
+    return businessesIndex(req, res)
   }
 
   if (resource === 'payments' && path.length === 1) {
