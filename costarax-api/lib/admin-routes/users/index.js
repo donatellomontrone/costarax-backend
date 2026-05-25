@@ -5,6 +5,11 @@ const { enforce } = require('../../rate-limit')
 const { logAdminAction } = require('../../admin-audit')
 const { replaceSupplierLink } = require('../../membership-admin')
 
+function normalizeUiRole(role) {
+  if (role === 'buyer') return 'business'
+  return role || '—'
+}
+
 async function handleUserUpdate(auth, body, res) {
   const { id, role, email } = body || {}
   if (!id) return res.status(400).json({ error: 'User id is required' })
@@ -113,7 +118,7 @@ module.exports = async (req, res) => {
     const result = users.map(u => ({
       id:              u.id,
       email:           u.email,
-      role:            profileMap[u.id]?.role || '—',
+      role:            normalizeUiRole(profileMap[u.id]?.role),
       created_at:      u.created_at,
       last_sign_in_at: u.last_sign_in_at || null,
       supplier_id:     supplierOrgByUser[u.id]?.supplier_id || null,
