@@ -101,6 +101,27 @@ async function handlePriceList(req, res) {
     return Array.from(byKey.values())
   }
 
+  const collapsePriceRows = (rows) => {
+    const byKey = new Map()
+    ;(rows || []).forEach(row => {
+      if (!row?.supplier_id || !row?.product_id) return
+      const unit = (row.unit || 'kg').trim()
+      const key = `${row.supplier_id}__${row.product_id}__${unit.toLowerCase()}`
+      const existing = byKey.get(key)
+      if (!existing) {
+        byKey.set(key, { ...row, unit })
+        return
+      }
+      byKey.set(key, {
+        ...existing,
+        ...row,
+        unit,
+        stock_qty: row.stock_qty ?? existing.stock_qty ?? null,
+      })
+    })
+    return Array.from(byKey.values())
+  }
+
   let supplierId = null, supplierName = 'Supplier'
   const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
   supplierId = org?.supplier_id || null
@@ -279,22 +300,23 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
             if (newP) newP.forEach((np,i) => priceRows2.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate2[i]._price, stock_qty: toCreate2[i]._stock, unit: toCreate2[i]._unit, active: true, updated_at: new Date().toISOString() }))
           }
           let persistErr = null
-          if (priceRows2.length && supplierId) {
+          const dedupedPriceRows2 = collapsePriceRows(priceRows2)
+          if (dedupedPriceRows2.length && supplierId) {
             const { error: deleteErr } = await supabaseAdmin
               .from('supplier_prices')
               .delete()
               .eq('supplier_id', supplierId)
-              .in('product_id', priceRows2.map(r => r.product_id))
+              .in('product_id', dedupedPriceRows2.map(r => r.product_id))
             if (deleteErr) {
               persistErr = 'Could not replace existing supplier prices: ' + deleteErr.message
             } else {
               const { error: insertErr2 } = await supabaseAdmin
                 .from('supplier_prices')
-                .insert(priceRows2)
+                .insert(dedupedPriceRows2)
               if (insertErr2) persistErr = 'Could not save supplier prices: ' + insertErr2.message
             }
           }
-          const matched2 = priceRows2.length
+          const matched2 = dedupedPriceRows2.length
           if (persistErr) {
             if (uploadId) {
               await supabaseAdmin.from('price_list_uploads').update({
@@ -473,8 +495,9 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
     })
   }
 
-  if (priceRows.length && supplierId) {
-    const productIds = priceRows.map(r => r.product_id)
+  const dedupedPriceRows = collapsePriceRows(priceRows)
+  if (dedupedPriceRows.length && supplierId) {
+    const productIds = dedupedPriceRows.map(r => r.product_id)
     const { error: deleteErr } = await supabaseAdmin
       .from('supplier_prices')
       .delete()
@@ -483,12 +506,12 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
     if (deleteErr) {
       upsertError = 'Could not replace existing supplier prices: ' + deleteErr.message
     } else {
-      const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(priceRows)
+      const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(dedupedPriceRows)
       upsertError = uErr ? ('Could not save supplier prices: ' + uErr.message) : null
     }
   }
 
-  const matched = priceRows.length
+  const matched = dedupedPriceRows.length
   if (insertError || upsertError) {
     if (uploadId) {
       await supabaseAdmin.from('price_list_uploads').update({
