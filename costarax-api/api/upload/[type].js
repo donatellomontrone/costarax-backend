@@ -79,13 +79,14 @@ async function handlePriceList(req, res) {
       if (!item?.name || !item?.price || Number(item.price) <= 0) return
       const canonicalName = (item.canonical || item.name || '').trim()
       const unit = (item.unit || 'kg').trim()
-      const key = `${canonicalName.toLowerCase()}__${unit.toLowerCase()}`
+      const price = Number(item.price)
+      const key = `${canonicalName.toLowerCase()}__${unit.toLowerCase()}__${price.toFixed(2)}`
       const existing = byKey.get(key)
       const normalized = {
         ...item,
         canonical: canonicalName,
         unit,
-        price: Number(item.price),
+        price,
         stock: item.stock === '' ? null : item.stock,
       }
       if (!existing) {
@@ -145,6 +146,7 @@ async function handlePriceList(req, res) {
     const ruleBlock = `Extract products from this price list. Return JSON array only.
 Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null}
 Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2).
+Canonical naming rules: keep the cut + grade/marble score + brand + origin/series + distinguishing form factor (bone-in/boneless/halves/roll/center cut) + pack/weight band when present. Never collapse different brands, grades, or size bands into the same canonical name. If two lines differ by brand/grade/series/weight, they must become different canonical names.
 stock rules: if the source row has a stock/qty/available/inventory column with a number, return that number. If the row explicitly says "out of stock" / "OOS" / "sold out", return 0. Otherwise return null (do not guess).
 Category rules: meat=pork/beef/chicken/poultry, seafood=fish/shrimp/squid, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices, beverages=drinks/juice/water, packaging=boxes/bags/containers.
 Supplier: ${supplierName}`
@@ -194,6 +196,7 @@ Supplier: ${supplierName}`
         const PAGE_HDR_RX   = /\+63|@|phone:|fax:|email:|Parañaque|Manila|Philippines/i
         const COL_HDR_RX    = /^Product Description[\s\t]+(Specs|Marble|Grade|Origin|Brand)/i
         const SECTION_RX    = /^[A-Z][A-Z\s\-\/&"]+[A-Z]\s*$/  // ALL-CAPS section headers
+        const PRODUCT_SHAPE_RX = /(?:\d+(?:\.\d+)?\s*(?:kg|g|lb|oz)\s*\/\s*(?:slab|pc|pack|bone|case|box|tray)|\b(?:bone in|boneless|tenderloin|strip loin|rib eye|cube roll|short loin|sirloin|tomahawk|rack loin|loin ribs|chuck roll)\b)/i
         const rawLines = pdfText.split('\n').map(l => l.trim())
         let curSection = '', curSubgroup = ''
         const productLines = []
@@ -205,7 +208,7 @@ Supplier: ${supplierName}`
             const prefix = [curSection, curSubgroup].filter(Boolean).join(' > ')
             productLines.push(prefix ? `${prefix} | ${line}` : line)
             curSubgroup = '' // reset after attaching to this product
-          } else if (line.length > 2 && line.length < 70) {
+          } else if (line.length > 2 && line.length < 70 && !PRODUCT_SHAPE_RX.test(line)) {
             curSubgroup = line  // likely a grade/breed sub-header (e.g. "F1 Wagyu", "Angus")
           }
         }
@@ -271,16 +274,30 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
           // Jump straight to DB upsert — bypass the single-call code
           const catalog2 = await supabaseAdmin.from('products').select('id, canonical_name').eq('active', true)
           const products2 = catalog2.data || []
-          function normalize2(s) { return (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim() }
+          function normalize2(s) { return (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim() }
+          function tokens2(s) { return normalize2(s).split(' ').filter(t => t.length > 2) }
+          function scoreProductMatch2(needleName, hayName) {
+            const needle = normalize2(needleName), hay = normalize2(hayName)
+            if (!needle || !hay) return -1
+            if (hay === needle) return 1000
+            if (hay.includes(needle) && needle.length >= 12) return 950 - Math.max(0, hay.length - needle.length)
+            const nt = tokens2(needle), ht = tokens2(hay)
+            if (!nt.length || !ht.length) return -1
+            if (nt.length < 3) return -1
+            const shared = nt.filter(t => ht.includes(t))
+            const needleRatio = shared.length / nt.length
+            const hayRatio = shared.length / ht.length
+            if (needleRatio < 0.8) return -1
+            if ((nt.length >= 4 && hayRatio < 0.45) || (nt.length < 4 && hayRatio < 0.6)) return -1
+            return needleRatio * 100 + hayRatio * 10 - Math.abs(ht.length - nt.length)
+          }
           function matchProduct2(canonical) {
-            const needle = normalize2(canonical)
-            return products2.find(p => {
-              const hay = normalize2(p.canonical_name)
-              if (hay === needle) return true
-              const nt = needle.split(' '), ht = hay.split(' ')
-              const shared = nt.filter(t => t.length > 2 && ht.includes(t)).length
-              return shared >= Math.ceil(nt.length * 0.6)
-            }) || null
+            let best = null, bestScore = -1
+            for (const p of products2) {
+              const score = scoreProductMatch2(canonical, p.canonical_name)
+              if (score > bestScore) { best = p; bestScore = score }
+            }
+            return bestScore >= 0 ? best : null
           }
           const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
           const validItems2 = collapseExtractedItems(extracted)
@@ -412,16 +429,30 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
 
   const { data: catalog } = await supabaseAdmin.from('products').select('id, canonical_name').eq('active', true)
   const products = catalog || []
-  function normalize(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim() }
+  function normalize(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() }
+  function tokens(s) { return normalize(s).split(' ').filter(t => t.length > 2) }
+  function scoreProductMatch(needleName, hayName) {
+    const needle = normalize(needleName), hay = normalize(hayName)
+    if (!needle || !hay) return -1
+    if (hay === needle) return 1000
+    if (hay.includes(needle) && needle.length >= 12) return 950 - Math.max(0, hay.length - needle.length)
+    const nt = tokens(needle), ht = tokens(hay)
+    if (!nt.length || !ht.length) return -1
+    if (nt.length < 3) return -1
+    const shared = nt.filter(t => ht.includes(t))
+    const needleRatio = shared.length / nt.length
+    const hayRatio = shared.length / ht.length
+    if (needleRatio < 0.8) return -1
+    if ((nt.length >= 4 && hayRatio < 0.45) || (nt.length < 4 && hayRatio < 0.6)) return -1
+    return needleRatio * 100 + hayRatio * 10 - Math.abs(ht.length - nt.length)
+  }
   function matchProduct(canonical) {
-    const needle = normalize(canonical)
-    return products.find(p => {
-      const hay = normalize(p.canonical_name)
-      if (hay === needle) return true
-      const nt = needle.split(' '), ht = hay.split(' ')
-      const shared = nt.filter(t => t.length > 2 && ht.includes(t)).length
-      return shared >= Math.ceil(nt.length * 0.6)
-    }) || null
+    let best = null, bestScore = -1
+    for (const p of products) {
+      const score = scoreProductMatch(canonical, p.canonical_name)
+      if (score > bestScore) { best = p; bestScore = score }
+    }
+    return bestScore >= 0 ? best : null
   }
 
   const VALID_CATEGORIES = ['meat', 'seafood', 'produce', 'dry', 'beverages', 'packaging']
