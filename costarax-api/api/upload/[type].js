@@ -73,6 +73,34 @@ async function handlePriceList(req, res) {
     return res.status(413).json({ error: 'File too large. Max ~3 MB. Try compressing the PDF or cropping the image.' })
   }
 
+  const collapseExtractedItems = (items) => {
+    const byKey = new Map()
+    ;(items || []).forEach(item => {
+      if (!item?.name || !item?.price || Number(item.price) <= 0) return
+      const canonicalName = (item.canonical || item.name || '').trim()
+      const unit = (item.unit || 'kg').trim()
+      const key = `${canonicalName.toLowerCase()}__${unit.toLowerCase()}`
+      const existing = byKey.get(key)
+      const normalized = {
+        ...item,
+        canonical: canonicalName,
+        unit,
+        price: Number(item.price),
+        stock: item.stock === '' ? null : item.stock,
+      }
+      if (!existing) {
+        byKey.set(key, normalized)
+        return
+      }
+      byKey.set(key, {
+        ...existing,
+        ...normalized,
+        stock: normalized.stock ?? existing.stock ?? null,
+      })
+    })
+    return Array.from(byKey.values())
+  }
+
   let supplierId = null, supplierName = 'Supplier'
   const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
   supplierId = org?.supplier_id || null
@@ -234,7 +262,7 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
             }) || null
           }
           const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
-          const validItems2 = extracted.filter(i => i.name && i.price && i.price > 0)
+          const validItems2 = collapseExtractedItems(extracted)
           const toCreate2 = [], priceRows2 = []
           const parseStock2 = (v) => { if (v===null||v===undefined||v==='') return null; const n=Number(v); return Number.isFinite(n)&&n>=0?n:null }
           for (const item of validItems2) {
@@ -375,7 +403,7 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
   }
 
   const VALID_CATEGORIES = ['meat', 'seafood', 'produce', 'dry', 'beverages', 'packaging']
-  const validItems = extracted.filter(i => i.name && i.price && i.price > 0)
+  const validItems = collapseExtractedItems(extracted)
   const toCreate = []
   const priceRows = []
   // Normalize stock value coming from the AI extractor: number ≥ 0 → kept, null/missing → null.
