@@ -250,11 +250,32 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
             const { data: newP } = await supabaseAdmin.from('products').insert(toCreate2.map(({_price,_unit,_stock,...p})=>p)).select('id,canonical_name')
             if (newP) newP.forEach((np,i) => priceRows2.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate2[i]._price, stock_qty: toCreate2[i]._stock, unit: toCreate2[i]._unit, active: true, updated_at: new Date().toISOString() }))
           }
+          let persistErr = null
           if (priceRows2.length && supplierId) {
-            await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId).in('product_id', priceRows2.map(r=>r.product_id))
-            await supabaseAdmin.from('supplier_prices').insert(priceRows2)
+            const { error: deleteErr } = await supabaseAdmin
+              .from('supplier_prices')
+              .delete()
+              .eq('supplier_id', supplierId)
+              .in('product_id', priceRows2.map(r => r.product_id))
+            if (deleteErr) {
+              persistErr = 'Could not replace existing supplier prices: ' + deleteErr.message
+            } else {
+              const { error: insertErr2 } = await supabaseAdmin
+                .from('supplier_prices')
+                .insert(priceRows2)
+              if (insertErr2) persistErr = 'Could not save supplier prices: ' + insertErr2.message
+            }
           }
           const matched2 = priceRows2.length
+          if (persistErr) {
+            if (uploadId) {
+              await supabaseAdmin.from('price_list_uploads').update({
+                status: 'rejected',
+                ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length, error: persistErr })
+              }).eq('id', uploadId)
+            }
+            return res.status(500).json({ error: persistErr, extracted: extracted.length, matched: matched2, created: toCreate2.length })
+          }
           if (uploadId) await supabaseAdmin.from('price_list_uploads').update({ status: 'needs_review', ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length }) }).eq('id', uploadId)
           return res.status(201).json({ message: `Done! ${matched2} product${matched2!==1?'s':''} indexed (${toCreate2.length} new added to catalog).`, extracted: extracted.length, matched: matched2, created: toCreate2.length, anomalies: [] })
         }
@@ -426,12 +447,44 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
 
   if (priceRows.length && supplierId) {
     const productIds = priceRows.map(r => r.product_id)
-    await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId).in('product_id', productIds)
-    const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(priceRows)
-    upsertError = uErr?.message || null
+    const { error: deleteErr } = await supabaseAdmin
+      .from('supplier_prices')
+      .delete()
+      .eq('supplier_id', supplierId)
+      .in('product_id', productIds)
+    if (deleteErr) {
+      upsertError = 'Could not replace existing supplier prices: ' + deleteErr.message
+    } else {
+      const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(priceRows)
+      upsertError = uErr ? ('Could not save supplier prices: ' + uErr.message) : null
+    }
   }
 
   const matched = priceRows.length
+  if (insertError || upsertError) {
+    if (uploadId) {
+      await supabaseAdmin.from('price_list_uploads').update({
+        status: 'rejected',
+        ai_summary: JSON.stringify({
+          extracted: extracted.length,
+          matched,
+          created,
+          anomalies: anomalies.length,
+          anomaly_details: anomalies.slice(0, 5),
+          error: upsertError || insertError
+        })
+      }).eq('id', uploadId)
+    }
+    return res.status(500).json({
+      error: upsertError || insertError,
+      extracted: extracted.length,
+      validItems: validItems.length,
+      toCreate: toCreate.length,
+      matched,
+      created,
+      anomalies
+    })
+  }
   if (uploadId) {
     await supabaseAdmin.from('price_list_uploads').update({
       status: anomalies.length ? 'needs_review' : 'needs_review',
