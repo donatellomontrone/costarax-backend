@@ -505,7 +505,7 @@ async function respond(res, suppliers) {
 async function buildSupplierProductsState(supplierId) {
   const { data: priceRows, error: priceErr } = await supabaseAdmin
     .from('supplier_prices')
-    .select('product_id, price_php, stock_qty, unit, updated_at, active')
+    .select('id, product_id, price_php, stock_qty, unit, updated_at, active')
     .eq('supplier_id', supplierId)
 
   if (priceErr) throw new Error(priceErr.message)
@@ -521,7 +521,31 @@ async function buildSupplierProductsState(supplierId) {
     ;(prods || []).forEach(p => { productMap[p.id] = p })
   }
 
-  const enrich = rows => (rows || []).map(r => ({ ...r, products: productMap[r.product_id] || null }))
+  const collapseRows = rows => {
+    const deduped = new Map()
+    ;(rows || []).forEach(row => {
+      const product = productMap[row.product_id] || null
+      const key = [
+        (product?.canonical_name || row.product_id || '').trim().toLowerCase(),
+        (row.unit || product?.default_unit || '').trim().toLowerCase(),
+        row.active === false ? 'hidden' : 'active',
+      ].join('__')
+
+      const existing = deduped.get(key)
+      if (!existing) {
+        deduped.set(key, row)
+        return
+      }
+
+      const existingTs = existing.updated_at ? new Date(existing.updated_at).getTime() : 0
+      const currentTs = row.updated_at ? new Date(row.updated_at).getTime() : 0
+      const keepCurrent = currentTs >= existingTs
+      if (keepCurrent) deduped.set(key, row)
+    })
+    return Array.from(deduped.values())
+  }
+
+  const enrich = rows => collapseRows(rows).map(r => ({ ...r, products: productMap[r.product_id] || null }))
   const uploadHistory = await loadUploadHistoryForSupplier(supplierId)
 
   return {
