@@ -10,8 +10,10 @@ function normalizeLinkResult(row, userId) {
   return {
     user_id: row?.user_id || userId,
     supplier_id: row?.supplier_id || null,
+    business_id: row?.business_id || null,
     displaced_user_ids: Array.isArray(row?.displaced_user_ids) ? row.displaced_user_ids.filter(Boolean) : [],
     removed_supplier_ids: Array.isArray(row?.removed_supplier_ids) ? row.removed_supplier_ids.filter(Boolean) : [],
+    removed_business_ids: Array.isArray(row?.removed_business_ids) ? row.removed_business_ids.filter(Boolean) : [],
   }
 }
 
@@ -117,8 +119,58 @@ async function replaceSupplierLink(db, { userId, supplierId = null }) {
   return replaceSupplierLinkLegacy(db, { userId, supplierId })
 }
 
+async function replaceBusinessLink(db, { userId, businessId = null }) {
+  const { data: currentRows, error: currentErr } = await db
+    .from('organization_members')
+    .select('user_id, supplier_id, business_id')
+    .eq('user_id', userId)
+    .not('business_id', 'is', null)
+
+  if (currentErr) throw new Error(currentErr.message)
+
+  const previousBusinessRows = (currentRows || [])
+    .filter(row => row.user_id === userId && row.business_id)
+    .map(cloneRow)
+
+  const { error: unlinkErr } = await db
+    .from('organization_members')
+    .delete()
+    .eq('user_id', userId)
+    .not('business_id', 'is', null)
+  if (unlinkErr) throw new Error(unlinkErr.message)
+
+  if (businessId) {
+    const { error: insertErr } = await db
+      .from('organization_members')
+      .insert({ user_id: userId, business_id: businessId })
+    if (insertErr) {
+      if (previousBusinessRows.length) await db.from('organization_members').insert(previousBusinessRows)
+      throw new Error(insertErr.message)
+    }
+  }
+
+  const { data: finalRows, error: finalErr } = await db
+    .from('organization_members')
+    .select('user_id, business_id')
+    .eq('user_id', userId)
+    .not('business_id', 'is', null)
+  if (finalErr) throw new Error(finalErr.message)
+
+  const linkedBusinessId = finalRows?.[0]?.business_id || null
+  if ((businessId || null) !== linkedBusinessId) {
+    throw new Error('Business link verification failed')
+  }
+
+  return normalizeLinkResult({
+    user_id: userId,
+    business_id: linkedBusinessId,
+    removed_business_ids: previousBusinessRows.map(row => row.business_id).filter(Boolean),
+  }, userId)
+}
+
 module.exports = {
   normalizeLinkResult,
+  replaceBusinessLink,
   replaceSupplierLink,
   replaceSupplierLinkLegacy,
   replaceSupplierLinkViaRpc,

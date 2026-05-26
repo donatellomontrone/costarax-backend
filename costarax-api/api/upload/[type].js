@@ -146,7 +146,7 @@ async function handlePriceList(req, res) {
     const ruleBlock = `Extract products from this price list. Return JSON array only.
 Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null}
 Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2).
-Canonical naming rules: keep the cut + grade/marble score + brand + origin/series + distinguishing form factor (bone-in/boneless/halves/roll/center cut) + pack/weight band when present. Never collapse different brands, grades, or size bands into the same canonical name. If two lines differ by brand/grade/series/weight, they must become different canonical names.
+Canonical naming rules: keep the cut + grade/marble score + brand + origin/series + distinguishing form factor (bone-in/boneless/halves/roll/center cut) + pack/weight band when present. Never collapse different brands, grades, or size bands into the same canonical name. If two lines differ by brand/grade/series/weight, they must become different canonical names. Example: "Creek Farm Striploin Grade 9 Grass Fed" must keep "Creek Farm" in canonical and must not become only "Striploin Grade 9 Grass Fed".
 stock rules: if the source row has a stock/qty/available/inventory column with a number, return that number. If the row explicitly says "out of stock" / "OOS" / "sold out", return 0. Otherwise return null (do not guess).
 Category rules: meat=pork/beef/chicken/poultry, seafood=fish/shrimp/squid, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices, beverages=drinks/juice/water, packaging=boxes/bags/containers.
 Supplier: ${supplierName}`
@@ -264,10 +264,14 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
           const seen = new Set()
           extracted = allItems.filter(i => {
             if (!i?.name) return false
-            const key = (i.canonical || i.name).toLowerCase().trim()
+            const canonicalName = (i.canonical || i.name || '').toLowerCase().trim()
+            const unit = (i.unit || 'kg').toLowerCase().trim()
+            const price = Number(i.price || 0)
+            const key = `${canonicalName}__${unit}__${price.toFixed(2)}`
             if (seen.has(key)) return false
-            seen.add(key); return true
-          }).filter(i => i.price > 0)
+            seen.add(key)
+            return price > 0
+          })
           console.log('[price-list upload] extracted after dedup+filter:', extracted.length)
           // Skip the normal single-call path below
           if (!extracted.length) throw new Error('No products could be extracted from the PDF text.')

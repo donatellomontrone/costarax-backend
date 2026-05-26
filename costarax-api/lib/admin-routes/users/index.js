@@ -3,7 +3,7 @@ const { supabaseAdmin, requireAdmin, requireSuperAdmin } = require('../../supaba
 const { sendEmail, adminCreatedAccountEmail, adminRoleChangedEmail } = require('../../email')
 const { enforce } = require('../../rate-limit')
 const { logAdminAction } = require('../../admin-audit')
-const { replaceSupplierLink } = require('../../membership-admin')
+const { replaceSupplierLink, replaceBusinessLink } = require('../../membership-admin')
 
 function normalizeUiRole(role) {
   if (role === 'buyer') return 'business'
@@ -128,6 +128,7 @@ module.exports = async (req, res) => {
       supplier_contact_email: supplierOrgByUser[u.id]?.suppliers?.contact_email || null,
       supplier_city: supplierOrgByUser[u.id]?.suppliers?.city || null,
       supplier_region: supplierOrgByUser[u.id]?.suppliers?.region || null,
+      business_id: businessOrgByUser[u.id]?.business_id || null,
       business_name:   businessOrgByUser[u.id]?.businesses?.name || null,
       business_status: businessOrgByUser[u.id]?.businesses?.status || null,
       business_city: businessOrgByUser[u.id]?.businesses?.city || null,
@@ -177,7 +178,7 @@ module.exports = async (req, res) => {
 
   // ── POST — create user OR send password reset email ──────────────────────
   if (req.method === 'POST') {
-    const { id, email, action, password, role, supplier_id } = req.body || {}
+    const { id, email, action, password, role, supplier_id, business_id } = req.body || {}
 
     if (action === 'edit_user') {
       return handleUserUpdate(auth, req.body, res)
@@ -210,6 +211,34 @@ module.exports = async (req, res) => {
         linked_supplier_id: linkResult?.supplier_id || null,
         displaced_user_ids: linkResult?.displaced_user_ids || [],
         removed_supplier_ids: linkResult?.removed_supplier_ids || [],
+      })
+    }
+
+    if (action === 'link_business') {
+      if (!id) return res.status(400).json({ error: 'User id is required' })
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id)
+      const canonicalEmail = authUser?.user?.email?.trim()?.toLowerCase?.() || null
+      if (canonicalEmail) {
+        try { await supabaseAdmin.from('profiles').upsert({ id, email: canonicalEmail }, { onConflict: 'id' }) } catch (_) {}
+      }
+      let linkResult
+      try {
+        linkResult = await replaceBusinessLink(supabaseAdmin, { userId: id, businessId: business_id || null })
+      } catch (e) {
+        return res.status(500).json({ error: e.message })
+      }
+      await logAdminAction(supabaseAdmin, {
+        admin_id: auth.user.id,
+        action_type: business_id ? 'link_business_user' : 'unlink_business_user',
+        target_id: id,
+        notes: business_id
+          ? `linked business ${business_id}`
+          : 'removed business link'
+      })
+      return res.status(200).json({
+        message: business_id ? 'Buyer linked' : 'Buyer unlinked',
+        linked_business_id: linkResult?.business_id || null,
+        removed_business_ids: linkResult?.removed_business_ids || [],
       })
     }
 
@@ -256,6 +285,13 @@ module.exports = async (req, res) => {
           console.error('[create-user] org_member insert failed:', e.message)
         }
       }
+      if (dbRole === 'buyer' && business_id) {
+        try {
+          await replaceBusinessLink(supabaseAdmin, { userId: created.user.id, businessId: business_id })
+        } catch (e) {
+          console.error('[create-user] business link failed:', e.message)
+        }
+      }
 
       // Generate a one-time set-password link and notify the new user.
       let resetLink = null
@@ -282,7 +318,7 @@ module.exports = async (req, res) => {
         admin_id: auth.user.id,
         action_type: 'create_user',
         target_id: created.user.id,
-        notes: `created ${email.trim().toLowerCase()} as ${dbRole}${supplier_id ? ` · linked supplier ${supplier_id}` : ''}`
+        notes: `created ${email.trim().toLowerCase()} as ${dbRole}${supplier_id ? ` · linked supplier ${supplier_id}` : ''}${business_id ? ` · linked business ${business_id}` : ''}`
       })
 
       return res.status(201).json({
