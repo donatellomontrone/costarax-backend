@@ -167,11 +167,17 @@ module.exports = async (req, res) => {
         const newName = String(body.name || '').trim()
         const newUnit = String(body.unit || '').trim()
         const newPrice = Number(body.price)
+        const newCategory = String(body.category || 'dry').trim()
+        const stockQty = body.stock_qty === '' || body.stock_qty === undefined ? null : Number(body.stock_qty)
+        const newActive = body.active === false ? false : true
 
         if (!isUuid(productId)) return res.status(400).json({ error: 'Invalid product id' })
         if (!newName) return res.status(400).json({ error: 'Product name is required' })
         if (!newUnit) return res.status(400).json({ error: 'Unit is required' })
         if (!Number.isFinite(newPrice) || newPrice <= 0) return res.status(400).json({ error: 'Price must be greater than 0' })
+        if (stockQty !== null && (!Number.isFinite(stockQty) || stockQty < 0)) {
+          return res.status(400).json({ error: 'Stock must be a non-negative number or empty' })
+        }
 
         const { data: existingPrice, error: priceFetchErr } = await supabaseAdmin
           .from('supplier_prices')
@@ -203,7 +209,7 @@ module.exports = async (req, res) => {
             .insert({
               canonical_name: newName,
               default_unit: newUnit,
-              category_id: sourceProduct.category_id,
+              category_id: newCategory || sourceProduct.category_id,
               image_url: sourceProduct.image_url || null,
               active: true,
             })
@@ -225,21 +231,27 @@ module.exports = async (req, res) => {
               product_id: targetProductId,
               price_php: newPrice,
               unit: newUnit,
-              stock_qty: existingPrice.stock_qty,
-              active: existingPrice.active,
+              stock_qty: stockQty === null ? null : stockQty,
+              active: newActive,
               updated_at: new Date().toISOString(),
             })
           if (insertErr) return res.status(500).json({ error: insertErr.message })
         } else {
           const { error: updateProdErr } = await supabaseAdmin
             .from('products')
-            .update({ canonical_name: newName, default_unit: newUnit })
+            .update({ canonical_name: newName, default_unit: newUnit, category_id: newCategory })
             .eq('id', productId)
           if (updateProdErr) return res.status(500).json({ error: updateProdErr.message })
 
           const { error: updatePriceErr } = await supabaseAdmin
             .from('supplier_prices')
-            .update({ price_php: newPrice, unit: newUnit, updated_at: new Date().toISOString() })
+            .update({
+              price_php: newPrice,
+              unit: newUnit,
+              stock_qty: stockQty === null ? null : stockQty,
+              active: newActive,
+              updated_at: new Date().toISOString()
+            })
             .eq('supplier_id', supplierId)
             .eq('product_id', productId)
           if (updatePriceErr) return res.status(500).json({ error: updatePriceErr.message })
