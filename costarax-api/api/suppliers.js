@@ -3,6 +3,30 @@ const { sendEmail } = require('../lib/email')
 const { applyCors } = require('../lib/cors')
 const { resolveSupplierMembership } = require('../lib/user-context')
 
+const PRODUCT_METADATA_COLUMNS = [
+  'producer',
+  'brand',
+  'cut_type',
+  'grade_spec',
+  'origin_series',
+  'form_factor',
+  'pack_weight',
+]
+let _productMetadataSchemaSupported = null
+async function productMetadataSchemaSupported() {
+  if (_productMetadataSchemaSupported !== null) return _productMetadataSchemaSupported
+  const { error } = await supabaseAdmin
+    .from('products')
+    .select(`id, ${PRODUCT_METADATA_COLUMNS.join(', ')}`)
+    .limit(1)
+  _productMetadataSchemaSupported = !error
+  return _productMetadataSchemaSupported
+}
+function productSelectColumns(includeMetadata) {
+  const base = ['id', 'canonical_name', 'default_unit', 'category_id', 'image_url']
+  return includeMetadata ? [...base, ...PRODUCT_METADATA_COLUMNS].join(', ') : base.join(', ')
+}
+
 // Fields a supplier can edit themselves (no name/tin/verified/plan/status/trial)
 const SUPPLIER_EDITABLE = [
   'tagline', 'description', 'categories', 'category', 'certifications',
@@ -111,6 +135,15 @@ module.exports = async (req, res) => {
         const category = String(body.category || 'dry').trim()
         const price = Number(body.price)
         const stockQty = body.stock_qty === '' || body.stock_qty === undefined ? null : Number(body.stock_qty)
+        const metadata = {
+          producer: String(body.producer || '').trim() || null,
+          brand: String(body.brand || '').trim() || null,
+          cut_type: String(body.cut_type || '').trim() || null,
+          grade_spec: String(body.grade_spec || '').trim() || null,
+          origin_series: String(body.origin_series || '').trim() || null,
+          form_factor: String(body.form_factor || '').trim() || null,
+          pack_weight: String(body.pack_weight || '').trim() || null,
+        }
 
         if (!name) return res.status(400).json({ error: 'Product name is required' })
         if (!unit) return res.status(400).json({ error: 'Unit is required' })
@@ -130,9 +163,13 @@ module.exports = async (req, res) => {
         if (existingProduct?.id) {
           productId = existingProduct.id
         } else {
+          const schemaSupportsMeta = await productMetadataSchemaSupported()
+          const insertPayload = schemaSupportsMeta
+            ? { canonical_name: name, default_unit: unit, category_id: category, active: true, ...metadata }
+            : { canonical_name: name, default_unit: unit, category_id: category, active: true }
           const { data: createdProduct, error: createErr } = await supabaseAdmin
             .from('products')
-            .insert({ canonical_name: name, default_unit: unit, category_id: category, active: true })
+            .insert(insertPayload)
             .select('id')
             .single()
           if (createErr) return res.status(500).json({ error: createErr.message })
@@ -170,6 +207,15 @@ module.exports = async (req, res) => {
         const newCategory = String(body.category || 'dry').trim()
         const stockQty = body.stock_qty === '' || body.stock_qty === undefined ? null : Number(body.stock_qty)
         const newActive = body.active === false ? false : true
+        const metadata = {
+          producer: String(body.producer || '').trim() || null,
+          brand: String(body.brand || '').trim() || null,
+          cut_type: String(body.cut_type || '').trim() || null,
+          grade_spec: String(body.grade_spec || '').trim() || null,
+          origin_series: String(body.origin_series || '').trim() || null,
+          form_factor: String(body.form_factor || '').trim() || null,
+          pack_weight: String(body.pack_weight || '').trim() || null,
+        }
 
         if (!isUuid(productId)) return res.status(400).json({ error: 'Invalid product id' })
         if (!newName) return res.status(400).json({ error: 'Product name is required' })
@@ -189,9 +235,10 @@ module.exports = async (req, res) => {
         if (priceFetchErr) return res.status(500).json({ error: priceFetchErr.message })
         if (!existingPrice) return res.status(404).json({ error: 'Product not found in your price list' })
 
+        const includeMetadata = await productMetadataSchemaSupported()
         const { data: sourceProduct, error: prodErr } = await supabaseAdmin
           .from('products')
-          .select('id, canonical_name, default_unit, category_id, image_url')
+          .select(productSelectColumns(includeMetadata))
           .eq('id', productId)
           .maybeSingle()
         if (prodErr) return res.status(500).json({ error: prodErr.message })
@@ -204,15 +251,17 @@ module.exports = async (req, res) => {
 
         let targetProductId = productId
         if ((supplierCount || 0) > 1 && sourceProduct) {
+          const clonePayload = {
+            canonical_name: newName,
+            default_unit: newUnit,
+            category_id: newCategory || sourceProduct.category_id,
+            image_url: sourceProduct.image_url || null,
+            active: true,
+            ...(includeMetadata ? metadata : {}),
+          }
           const { data: clonedProduct, error: cloneErr } = await supabaseAdmin
             .from('products')
-            .insert({
-              canonical_name: newName,
-              default_unit: newUnit,
-              category_id: newCategory || sourceProduct.category_id,
-              image_url: sourceProduct.image_url || null,
-              active: true,
-            })
+            .insert(clonePayload)
             .select('id')
             .single()
           if (cloneErr) return res.status(500).json({ error: cloneErr.message })
@@ -237,9 +286,15 @@ module.exports = async (req, res) => {
             })
           if (insertErr) return res.status(500).json({ error: insertErr.message })
         } else {
+          const updateProductPayload = {
+            canonical_name: newName,
+            default_unit: newUnit,
+            category_id: newCategory,
+            ...(includeMetadata ? metadata : {}),
+          }
           const { error: updateProdErr } = await supabaseAdmin
             .from('products')
-            .update({ canonical_name: newName, default_unit: newUnit, category_id: newCategory })
+            .update(updateProductPayload)
             .eq('id', productId)
           if (updateProdErr) return res.status(500).json({ error: updateProdErr.message })
 
@@ -525,9 +580,10 @@ async function buildSupplierProductsState(supplierId) {
   const productIds = [...new Set((priceRows || []).map(p => p.product_id).filter(Boolean))]
   let productMap = {}
   if (productIds.length > 0) {
+    const includeMetadata = await productMetadataSchemaSupported()
     const { data: prods, error: prodErr } = await supabaseAdmin
       .from('products')
-      .select('id, canonical_name, default_unit, category_id, image_url')
+      .select(productSelectColumns(includeMetadata))
       .in('id', productIds)
     if (prodErr) throw new Error(prodErr.message)
     ;(prods || []).forEach(p => { productMap[p.id] = p })

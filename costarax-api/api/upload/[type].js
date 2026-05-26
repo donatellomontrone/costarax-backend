@@ -52,6 +52,86 @@ async function readJsonBody(req) {
   })
 }
 
+const PRODUCT_METADATA_COLUMNS = [
+  'producer',
+  'brand',
+  'cut_type',
+  'grade_spec',
+  'origin_series',
+  'form_factor',
+  'pack_weight',
+]
+
+let _productMetadataSchemaSupported = null
+async function productMetadataSchemaSupported() {
+  if (_productMetadataSchemaSupported !== null) return _productMetadataSchemaSupported
+  const { error } = await supabaseAdmin
+    .from('products')
+    .select(`id, ${PRODUCT_METADATA_COLUMNS.join(', ')}`)
+    .limit(1)
+  _productMetadataSchemaSupported = !error
+  return _productMetadataSchemaSupported
+}
+
+function titleCaseWords(s) {
+  return String(s || '').replace(/\b\w/g, c => c.toUpperCase()).trim()
+}
+
+function inferStructuredProductMeta(rawName, unit, explicit = {}) {
+  const raw = String(rawName || '').replace(/\s+/g, ' ').trim()
+  const safeUnit = String(unit || '').trim() || 'kg'
+  const CUT_PATTERNS = [
+    ['Tenderloin', /tenderloin/i],
+    ['Striploin', /strip\s*loin|striploin/i],
+    ['Ribeye', /rib\s*eye|ribeye/i],
+    ['Cube Roll', /cube\s*roll/i],
+    ['Sirloin', /sirloin/i],
+    ['Short Loin', /short\s*loin/i],
+    ['Porterhouse', /porterhouse/i],
+    ['T-Bone', /\bt[\s-]?bone\b/i],
+    ['Tomahawk', /tomahawk/i],
+    ['Butter', /\bbutter\b/i],
+    ['Salami', /\bsalami\b/i],
+    ['Cheese', /\bcheese\b/i],
+    ['Wagyu', /\bwagyu\b/i],
+  ]
+  const cutMatch = CUT_PATTERNS.find(([, rx]) => rx.test(raw))
+  let inferredBrand = null
+  let inferredProducer = null
+  if (cutMatch) {
+    const idx = raw.search(cutMatch[1])
+    if (idx > 0) {
+      inferredBrand = raw.slice(0, idx).replace(/[|,-]\s*$/, '').trim()
+    }
+  }
+  const producerMatch = raw.match(/\b(?:ohmi|mayura|sanchoku|minerva|creek\s*farm|point reyes|aguila gourmet meats|fidm reserve|vega sotuelamos|basiron)\b/i)
+  if (producerMatch?.[0]) inferredProducer = titleCaseWords(producerMatch[0])
+  const gradeParts = []
+  const addGrade = (m) => { if (m && !gradeParts.includes(m[0].trim())) gradeParts.push(m[0].trim()) }
+  addGrade(raw.match(/\bA\d\b/i))
+  addGrade(raw.match(/\b(?:grade|marble(?:\s+grade|\s+score)?|ms|mb)\s*[- ]?\d+(?:\s*[-/]\s*\d+)?(?:\s*plus)?\b/i))
+  addGrade(raw.match(/\bgrass\s*fed\b/i))
+  addGrade(raw.match(/\bgrain\s*fed\b/i))
+  addGrade(raw.match(/\bfullblood\b/i))
+  const pack = raw.match(/\b\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?\s*(?:kg|g|lb|oz)\s*\/\s*(?:slab|pc|pack|case|box|tray|roll|bag|carton)\b/i)?.[0] || null
+  const formBits = []
+  ;['halves','half','bone in','bone-in','boneless','roll','slab','whole','block','sliced','center cut','center-cut'].forEach(token => {
+    const rx = new RegExp(`\\b${token.replace('-', '[- ]?')}\\b`, 'i')
+    if (rx.test(raw)) formBits.push(titleCaseWords(token))
+  })
+  const origin = raw.match(/\b(?:black\s*angus|f1\s*wagyu|irish|milano|australian|japanese|american)\b/i)?.[0] || null
+  return {
+    producer: explicit.producer || inferredProducer || inferredBrand || null,
+    brand: explicit.brand || inferredBrand || inferredProducer || null,
+    cut_type: explicit.cut_type || explicit.cut || (cutMatch ? cutMatch[0] : null),
+    grade_spec: explicit.grade_spec || explicit.grade || (gradeParts.length ? gradeParts.join(' · ') : null),
+    origin_series: explicit.origin_series || explicit.origin || (origin ? titleCaseWords(origin) : null),
+    form_factor: explicit.form_factor || explicit.form || (formBits.length ? formBits.join(' · ') : null),
+    pack_weight: explicit.pack_weight || explicit.pack || pack || null,
+    default_unit: safeUnit,
+  }
+}
+
 // ── 1) price-list (text → AI extract → DB upsert) ─────────────────────────
 async function handlePriceList(req, res) {
   const auth = await requireAuth(req, res)
@@ -144,7 +224,7 @@ async function handlePriceList(req, res) {
   let extracted = []
   try {
     const ruleBlock = `Extract products from this price list. Return JSON array only.
-Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null}
+Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null,"producer":"optional","brand":"optional","cut_type":"optional","grade_spec":"optional","origin_series":"optional","form_factor":"optional","pack_weight":"optional"}
 Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2).
 Canonical naming rules: keep the cut + grade/marble score + brand + origin/series + distinguishing form factor (bone-in/boneless/halves/roll/center cut) + pack/weight band when present. Never collapse different brands, grades, or size bands into the same canonical name. If two lines differ by brand/grade/series/weight, they must become different canonical names. Example: "Creek Farm Striploin Grade 9 Grass Fed" must keep "Creek Farm" in canonical and must not become only "Striploin Grade 9 Grass Fed".
 stock rules: if the source row has a stock/qty/available/inventory column with a number, return that number. If the row explicitly says "out of stock" / "OOS" / "sold out", return 0. Otherwise return null (do not guess).
@@ -330,10 +410,28 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
             const unit = (item.unit||'kg').trim()
             const stock_qty = parseStock2(item.stock)
             if (product) priceRows2.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
-            else toCreate2.push({ canonical_name: canonicalName, category_id, default_unit: unit, active: true, _price: parseFloat(item.price), _unit: unit, _stock: stock_qty })
+            else {
+              const meta = inferStructuredProductMeta(canonicalName, unit, item)
+              toCreate2.push({
+                canonical_name: canonicalName,
+                category_id,
+                default_unit: unit,
+                active: true,
+                ...meta,
+                _price: parseFloat(item.price),
+                _unit: unit,
+                _stock: stock_qty
+              })
+            }
           }
           if (toCreate2.length) {
-            const { data: newP } = await supabaseAdmin.from('products').insert(toCreate2.map(({_price,_unit,_stock,...p})=>p)).select('id,canonical_name')
+            const schemaSupportsMeta = await productMetadataSchemaSupported()
+            const insertPayload = toCreate2.map(({_price,_unit,_stock, ...p}) => {
+              if (schemaSupportsMeta) return p
+              const { producer, brand, cut_type, grade_spec, origin_series, form_factor, pack_weight, ...legacy } = p
+              return legacy
+            })
+            const { data: newP } = await supabaseAdmin.from('products').insert(insertPayload).select('id,canonical_name')
             if (newP) newP.forEach((np,i) => priceRows2.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate2[i]._price, stock_qty: toCreate2[i]._stock, unit: toCreate2[i]._unit, active: true, updated_at: new Date().toISOString() }))
           }
           let persistErr = null
@@ -509,12 +607,29 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
     const unit = (item.unit || 'kg').trim()
     const stock_qty = parseStock(item.stock)
     if (product) priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
-    else toCreate.push({ canonical_name: canonicalName, category_id, default_unit: unit, active: true, _price: parseFloat(item.price), _unit: unit, _stock: stock_qty })
+    else {
+      const meta = inferStructuredProductMeta(canonicalName, unit, item)
+      toCreate.push({
+        canonical_name: canonicalName,
+        category_id,
+        default_unit: unit,
+        active: true,
+        ...meta,
+        _price: parseFloat(item.price),
+        _unit: unit,
+        _stock: stock_qty
+      })
+    }
   }
 
   let created = 0, insertError = null, upsertError = null
   if (toCreate.length) {
-    const insertPayload = toCreate.map(({ _price, _unit, _stock, ...p }) => p)
+    const schemaSupportsMeta = await productMetadataSchemaSupported()
+    const insertPayload = toCreate.map(({ _price, _unit, _stock, ...p }) => {
+      if (schemaSupportsMeta) return p
+      const { producer, brand, cut_type, grade_spec, origin_series, form_factor, pack_weight, ...legacy } = p
+      return legacy
+    })
     const { data: newProducts, error: iErr } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
     insertError = iErr?.message || null
     if (newProducts) {
