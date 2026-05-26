@@ -280,9 +280,25 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
           const products2 = catalog2.data || []
           function normalize2(s) { return (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim() }
           function tokens2(s) { return normalize2(s).split(' ').filter(t => t.length > 2) }
+          const CUT_START_RX2 = /\b(strip\s*loin|striploin|rib\s*eye|ribeye|cube\s*roll|tenderloin|short\s*loin|sirloin|porterhouse|t-bone|tomahawk|chuck\s*roll|strip|loin|butter|salami|cheese|wagyu)\b/i
+          function extractLeadingQualifier2(name) {
+            const raw = String(name || '').replace(/\s+/g, ' ').trim()
+            if (!raw) return ''
+            const match = raw.match(CUT_START_RX2)
+            if (!match || match.index <= 0) return ''
+            return normalize2(raw.slice(0, match.index))
+          }
+          function leadingQualifierCompatible2(needleName, hayName) {
+            const needleQualifier = extractLeadingQualifier2(needleName)
+            if (!needleQualifier) return true
+            const hayQualifier = extractLeadingQualifier2(hayName)
+            if (!hayQualifier) return false
+            return hayQualifier.includes(needleQualifier) || needleQualifier.includes(hayQualifier)
+          }
           function scoreProductMatch2(needleName, hayName) {
             const needle = normalize2(needleName), hay = normalize2(hayName)
             if (!needle || !hay) return -1
+            if (!leadingQualifierCompatible2(needleName, hayName)) return -1
             if (hay === needle) return 1000
             if (hay.includes(needle) && needle.length >= 12) return 950 - Math.max(0, hay.length - needle.length)
             const nt = tokens2(needle), ht = tokens2(hay)
@@ -435,9 +451,25 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
   const products = catalog || []
   function normalize(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() }
   function tokens(s) { return normalize(s).split(' ').filter(t => t.length > 2) }
+  const CUT_START_RX = /\b(strip\s*loin|striploin|rib\s*eye|ribeye|cube\s*roll|tenderloin|short\s*loin|sirloin|porterhouse|t-bone|tomahawk|chuck\s*roll|strip|loin|butter|salami|cheese|wagyu)\b/i
+  function extractLeadingQualifier(name) {
+    const raw = String(name || '').replace(/\s+/g, ' ').trim()
+    if (!raw) return ''
+    const match = raw.match(CUT_START_RX)
+    if (!match || match.index <= 0) return ''
+    return normalize(raw.slice(0, match.index))
+  }
+  function leadingQualifierCompatible(needleName, hayName) {
+    const needleQualifier = extractLeadingQualifier(needleName)
+    if (!needleQualifier) return true
+    const hayQualifier = extractLeadingQualifier(hayName)
+    if (!hayQualifier) return false
+    return hayQualifier.includes(needleQualifier) || needleQualifier.includes(hayQualifier)
+  }
   function scoreProductMatch(needleName, hayName) {
     const needle = normalize(needleName), hay = normalize(hayName)
     if (!needle || !hay) return -1
+    if (!leadingQualifierCompatible(needleName, hayName)) return -1
     if (hay === needle) return 1000
     if (hay.includes(needle) && needle.length >= 12) return 950 - Math.max(0, hay.length - needle.length)
     const nt = tokens(needle), ht = tokens(hay)
