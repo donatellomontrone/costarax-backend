@@ -401,7 +401,11 @@ Supplier: ${supplierName}`
         // max_tokens budget on that noise, yielding just 9–11 products per call.
         // By pre-filtering to price-bearing lines only, each chunk becomes
         // densely packed with products → 70 products per chunk, ~9 chunks total.
-        const PRICE_LINE_RX = /\d[\d,]*\.\d{2}\/\w/
+        //
+        // The price-line regex is intentionally lax: handles ASCII "/kg" as
+        // well as fullwidth "／ｋｇ" (Japanese price lists) and tolerates a
+        // space between the decimal and the slash ("5,500.00 / kg").
+        const PRICE_LINE_RX = /\d[\d,]*\.\d{2}\s*[\/／]\s*\S/
         const PAGE_HDR_RX   = /\+63|@|phone:|fax:|email:|Parañaque|Manila|Philippines/i
         const COL_HDR_RX    = /^Product Description[\s\t]+(Specs|Marble|Grade|Origin|Brand)/i
         const SECTION_RX    = /^[A-Z][A-Z\s\-\/&"]+[A-Z]\s*$/  // ALL-CAPS section headers
@@ -409,13 +413,41 @@ Supplier: ${supplierName}`
         const rawLines = pdfText.split('\n').map(l => l.trim())
         let curSection = '', curSubgroup = ''
         const productLines = []
-        for (const line of rawLines) {
+        for (let li = 0; li < rawLines.length; li++) {
+          const line = rawLines[li]
           if (!line || PAGE_HDR_RX.test(line) || COL_HDR_RX.test(line)) continue
           if (SECTION_RX.test(line) && line.length < 70) { curSection = line; curSubgroup = ''; continue }
           if (PRICE_LINE_RX.test(line)) {
+            // If the price-line is short (price-only, no product name),
+            // back-track to the previous price line and pull the full
+            // product block as context. No fixed line limit — column-based
+            // PDFs (e.g. Japanese price lists) can spread one product over
+            // 20+ lines.
+            //
+            // Cap at 50 lines / 700 chars total so the AI prompt stays clean.
+            // We do NOT stop on SECTION_RX during the backtrack: in many
+            // PDFs an ALL-CAPS line like "SASHIMI GRADE" is per-product
+            // metadata rather than a real section header.
+            let combinedLine = line
+            if (line.length < 40) {
+              const ctx = []
+              for (let j = li - 1; j >= 0; j--) {
+                const prev = rawLines[j]
+                if (!prev) continue
+                if (PRICE_LINE_RX.test(prev)) break
+                if (PAGE_HDR_RX.test(prev) || COL_HDR_RX.test(prev)) continue
+                ctx.unshift(prev)
+                if (ctx.length >= 50) break
+              }
+              if (ctx.length) {
+                let joined = ctx.join(' | ')
+                if (joined.length > 700) joined = joined.slice(-700)
+                combinedLine = `${joined} | ${line}`
+              }
+            }
             // Prefix with section + sub-group context so AI can form proper canonical names
             const prefix = [curSection, curSubgroup].filter(Boolean).join(' > ')
-            productLines.push(prefix ? `${prefix} | ${line}` : line)
+            productLines.push(prefix ? `${prefix} | ${combinedLine}` : combinedLine)
             curSubgroup = '' // reset after attaching to this product
           } else if (line.length > 2 && line.length < 70 && !PRODUCT_SHAPE_RX.test(line)) {
             curSubgroup = line  // likely a grade/breed sub-header (e.g. "F1 Wagyu", "Angus")
@@ -465,13 +497,13 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
             try { const items = JSON.parse(raw); allItems.push(...items) } catch (_) {}
           }
           console.log('[price-list upload] total items before dedup:', allItems.length)
-          // Deduplicate by CANONICAL name (not original name).
+          // Deduplicate by CANONICAL name + unit + price (not name).
           // Many products share the same base cut name ("Tenderloin", "Chuck Roll")
           // but are distinct entries because they differ in brand/grade/origin.
           // Using the canonical (which includes brand/grade) preserves all unique products
           // while still removing genuine duplicates from chunk-boundary overlap.
           const seen = new Set()
-          extracted = allItems.filter(i => {
+          let filtered = allItems.filter(i => {
             if (!i?.name) return false
             const canonicalName = (i.canonical || i.name || '').toLowerCase().trim()
             const unit = (i.unit || 'kg').toLowerCase().trim()
@@ -480,6 +512,19 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
             if (seen.has(key)) return false
             seen.add(key)
             return price > 0
+          })
+          // Auto-rename duplicates that share canonical+unit with different prices:
+          // append " (2)", " (3)", … so each gets a distinct product row.
+          // Without this, collapsePriceRows would drop all but one price.
+          const seenKeyCountPdf = new Map()
+          extracted = filtered.map(i => {
+            const c = (i.canonical || i.name || '').trim()
+            const u = (i.unit || 'kg').trim()
+            const k = `${c.toLowerCase()}__${u.toLowerCase()}`
+            const n = seenKeyCountPdf.get(k) || 0
+            seenKeyCountPdf.set(k, n + 1)
+            if (n > 0) return { ...i, canonical: `${c} (${n + 1})` }
+            return i
           })
           console.log('[price-list upload] extracted after dedup+filter:', extracted.length)
           // Skip the normal single-call path below
@@ -630,15 +675,42 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
         useStrictMatching = true  // template canonicals are deterministic — don't fuzzy match
         // Fall through to catalog lookup below — skip the AI call.
       } else {
-        // 2. For large free-form text → chunked parallel AI calls.
+        // 2. For long text → chunked parallel AI calls.
         // 3. For short text → single AI call (original behaviour).
-        const textLines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5)
-        if (textLines.length > 60) {
-          const LINES_PER_CHUNK = 70
+        //
+        // Chunk by character count, not lines: browser pdfjs returns one
+        // very long line per page (~1KB each), so a 20-page PDF has only
+        // ~20 lines — the old "lines.length > 60" gate skipped chunking
+        // and the AI then truncated its output past 4000 tokens.
+        const CHARS_PER_CHUNK = 3500   // ~875 tokens input → ~875 tokens output room left
+        const MAX_CHUNKS = 10
+        const NEEDS_CHUNKING = text.length > 6000
+        if (NEEDS_CHUNKING) {
+          // Greedy chunk on line boundaries; fall back to hard-cut if any
+          // single line is itself larger than the chunk size.
+          const lines = text.split('\n').filter(l => l.trim().length > 0)
           const textChunks = []
-          for (let ci = 0; ci < textLines.length && textChunks.length < 10; ci += LINES_PER_CHUNK) {
-            textChunks.push(textLines.slice(ci, ci + LINES_PER_CHUNK).join('\n'))
+          let cur = ''
+          for (const ln of lines) {
+            if (ln.length > CHARS_PER_CHUNK) {
+              // Single line too big — hard-cut it
+              if (cur) { textChunks.push(cur); cur = '' }
+              for (let off = 0; off < ln.length && textChunks.length < MAX_CHUNKS; off += CHARS_PER_CHUNK) {
+                textChunks.push(ln.slice(off, off + CHARS_PER_CHUNK))
+              }
+              continue
+            }
+            if (cur.length + ln.length + 1 > CHARS_PER_CHUNK) {
+              textChunks.push(cur)
+              if (textChunks.length >= MAX_CHUNKS) { cur = ''; break }
+              cur = ln
+            } else {
+              cur = cur ? `${cur}\n${ln}` : ln
+            }
           }
+          if (cur && textChunks.length < MAX_CHUNKS) textChunks.push(cur)
+
+          console.log(`[price-list upload] text chunking: ${textChunks.length} chunks (~${text.length} chars total)`)
           const anthropicInner2 = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
           const chunkResults2 = await Promise.all(textChunks.map((chunk, idx) =>
             anthropicInner2.messages.create({
@@ -647,7 +719,7 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
               messages: [{ role: 'user', content: `${ruleBlock}\n---\n${chunk}\n---\nJSON:` }]
             }).then(r => {
               const t = r.content?.[0]?.text?.trim() || ''
-              console.log(`[text-chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens}`)
+              console.log(`[text-chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${t.length}`)
               return t
             }).catch(e => { console.error(`[text-chunk ${idx}] FAILED:`, e.message); return '' })
           ))
@@ -663,13 +735,25 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
             }
             try { const items = JSON.parse(raw); allTextItems.push(...items) } catch (_) {}
           }
+          // Dedup by canonical+unit+price; auto-rename same canonical+unit
+          // with different prices so collapsePriceRows doesn't drop variants.
           const seenText = new Set()
-          extracted = allTextItems.filter(i => {
+          let filteredText = allTextItems.filter(i => {
             if (!i?.name) return false
             const key = `${(i.canonical||i.name).toLowerCase()}__${(i.unit||'kg').toLowerCase()}__${Number(i.price||0).toFixed(2)}`
             if (seenText.has(key)) return false
             seenText.add(key)
             return Number(i.price) > 0
+          })
+          const seenKeyCountTxt = new Map()
+          extracted = filteredText.map(i => {
+            const c = (i.canonical || i.name || '').trim()
+            const u = (i.unit || 'kg').trim()
+            const k = `${c.toLowerCase()}__${u.toLowerCase()}`
+            const n = seenKeyCountTxt.get(k) || 0
+            seenKeyCountTxt.set(k, n + 1)
+            if (n > 0) return { ...i, canonical: `${c} (${n + 1})` }
+            return i
           })
           console.log('[price-list upload] text-chunk extracted:', extracted.length, 'items')
         } else {
