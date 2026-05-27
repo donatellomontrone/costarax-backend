@@ -132,6 +132,92 @@ function inferStructuredProductMeta(rawName, unit, explicit = {}) {
   }
 }
 
+// ── CSV/TSV row parser (handles simple quoted fields) ────────────────────────
+function parseCsvRow(line, sep) {
+  const cells = []
+  let cur = '', inQ = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inQ) {
+      if (c === '"') { if (line[i+1] === '"') { cur += '"'; i++ } else inQ = false }
+      else cur += c
+    } else {
+      if (c === '"') { inQ = true }
+      else if (c === sep) { cells.push(cur.trim()); cur = '' }
+      else cur += c
+    }
+  }
+  cells.push(cur.trim())
+  return cells
+}
+
+// ── Direct parser for Costarax price-list template (CSV or TSV) ─────────────
+// Detects the header row and parses without calling the AI.
+// Returns null if the text does not match the template format.
+function parseCostaraxTemplate(text, supplierName) {
+  const lines = text.split('\n').map(l => l.trimEnd()).filter(l => l.trim().length > 0)
+  if (lines.length < 2) return null
+  const sep = lines[0].includes('\t') ? '\t' : ','
+  const headers = parseCsvRow(lines[0].toLowerCase(), sep)
+  const nameIdx  = headers.findIndex(h => h === 'product_name')
+  const priceIdx = headers.findIndex(h => h === 'price_php')
+  if (nameIdx === -1 || priceIdx === -1) return null  // not our template
+
+  const unitIdx  = headers.findIndex(h => h === 'unit')
+  const stockIdx = headers.findIndex(h => h === 'stock_qty')
+  const notesIdx = headers.findIndex(h => h === 'notes')
+
+  const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
+  function inferCat(name) {
+    const n = name.toLowerCase()
+    if (/\b(beef|pork|chicken|poultry|lamb|veal|meat|tenderloin|loin|chuck|rib|wagyu|tomahawk|striploin|strip loin|sirloin|ribeye|cube roll|t-bone|porterhouse|rack)\b/.test(n)) return 'meat'
+    if (/\b(fish|shrimp|prawn|squid|seafood|crab|lobster|salmon|tuna|tilapia|bangus|milkfish)\b/.test(n)) return 'seafood'
+    if (/\b(vegetable|fruit|egg|tomato|cabbage|onion|potato|carrot|lettuce|mushroom|herb)\b/.test(n)) return 'produce'
+    if (/\b(rice|flour|oil|sugar|salt|sauce|vinegar|canned|spice|pepper|coffee|tea|noodle|pasta|dried|powder)\b/.test(n)) return 'dry'
+    if (/\b(drink|juice|water|soda|beverage|beer|wine|alcohol)\b/.test(n)) return 'beverages'
+    if (/\b(box|bag|container|tray|packaging)\b/.test(n)) return 'packaging'
+    return 'dry'
+  }
+
+  const items = []
+  for (let i = 1; i < lines.length; i++) {
+    const cells = parseCsvRow(lines[i], sep)
+    const rawName = (cells[nameIdx] || '').trim()
+    const priceStr = (cells[priceIdx] || '').replace(/,/g, '').trim()
+    const price = parseFloat(priceStr)
+    if (!rawName || !isFinite(price) || price <= 0) continue
+
+    const unit = unitIdx >= 0 ? (cells[unitIdx] || '').trim() || 'kg' : 'kg'
+    const stockRaw = stockIdx >= 0 ? (cells[stockIdx] || '').trim() : ''
+    const notes = notesIdx >= 0 ? (cells[notesIdx] || '').trim() : ''
+
+    const stockN = parseFloat(stockRaw)
+    const stock = stockRaw === '' ? null : (isFinite(stockN) && stockN >= 0 ? stockN : null)
+
+    // Build canonical: prepend brand from notes if it's a short brand-looking string
+    // and not already in the product name
+    let canonical = rawName
+    if (notes && notes.length > 0 && notes.length < 40 && /^[A-Za-z0-9]/.test(notes)) {
+      if (!rawName.toLowerCase().includes(notes.toLowerCase())) {
+        canonical = `${notes} ${rawName}`
+      }
+    }
+
+    items.push({
+      name: rawName,
+      canonical,
+      price,
+      unit,
+      stock,
+      category: inferCat(canonical),
+      producer: notes || null,
+    })
+  }
+
+  console.log('[price-list upload] template-parse: extracted', items.length, 'items from', lines.length - 1, 'data rows')
+  return items.length > 0 ? items : null
+}
+
 // ── 1) price-list (text → AI extract → DB upsert) ─────────────────────────
 async function handlePriceList(req, res) {
   const auth = await requireAuth(req, res)
@@ -475,9 +561,64 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
         ]
       }
     } else {
-      userContent = `${ruleBlock}\n---\n${text.slice(0, 4000)}\n---\nJSON:`
+      // ── Text path (CSV / TSV / XLSX-converted) ─────────────────────────
+      // 1. Try direct template parse (no AI needed, handles all rows).
+      const tmplItems = parseCostaraxTemplate(text, supplierName)
+      if (tmplItems && tmplItems.length > 0) {
+        extracted = tmplItems
+        // Fall through to catalog lookup below — skip the AI call.
+      } else {
+        // 2. For large free-form text → chunked parallel AI calls.
+        // 3. For short text → single AI call (original behaviour).
+        const textLines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5)
+        if (textLines.length > 60) {
+          const LINES_PER_CHUNK = 70
+          const textChunks = []
+          for (let ci = 0; ci < textLines.length && textChunks.length < 10; ci += LINES_PER_CHUNK) {
+            textChunks.push(textLines.slice(ci, ci + LINES_PER_CHUNK).join('\n'))
+          }
+          const anthropicInner2 = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+          const chunkResults2 = await Promise.all(textChunks.map((chunk, idx) =>
+            anthropicInner2.messages.create({
+              model, max_tokens: 6000, temperature: 0,
+              system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
+              messages: [{ role: 'user', content: `${ruleBlock}\n---\n${chunk}\n---\nJSON:` }]
+            }).then(r => {
+              const t = r.content?.[0]?.text?.trim() || ''
+              console.log(`[text-chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens}`)
+              return t
+            }).catch(e => { console.error(`[text-chunk ${idx}] FAILED:`, e.message); return '' })
+          ))
+          const allTextItems = []
+          for (const chunkContent of chunkResults2) {
+            if (!chunkContent) continue
+            const m = chunkContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || chunkContent.match(/(\[[\s\S]*)/)
+            let raw = m ? (m[1] || m[0]).trim() : chunkContent.trim()
+            if (!raw.startsWith('[')) raw = '[' + raw
+            if (!raw.trimEnd().endsWith(']')) {
+              const last = raw.lastIndexOf('},')
+              raw = (last > 0 ? raw.slice(0, last + 1) : raw) + ']'
+            }
+            try { const items = JSON.parse(raw); allTextItems.push(...items) } catch (_) {}
+          }
+          const seenText = new Set()
+          extracted = allTextItems.filter(i => {
+            if (!i?.name) return false
+            const key = `${(i.canonical||i.name).toLowerCase()}__${(i.unit||'kg').toLowerCase()}__${Number(i.price||0).toFixed(2)}`
+            if (seenText.has(key)) return false
+            seenText.add(key)
+            return Number(i.price) > 0
+          })
+          console.log('[price-list upload] text-chunk extracted:', extracted.length, 'items')
+        } else {
+          // Short text — single AI call
+          userContent = `${ruleBlock}\n---\n${text}\n---\nJSON:`
+        }
+      }
     }
 
+    // ── Single AI call (images, PDF fallback, short text) ────────────────
+    if (!extracted.length && userContent !== undefined) {
     const aiMsg = await anthropic.messages.create({
       model,
       max_tokens: 4000,
@@ -528,6 +669,7 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
         extracted = objs
       }
     }
+    } // end: if (!extracted.length && userContent !== undefined)
   } catch (e) {
     const errDetail = {
       message: e.message,
