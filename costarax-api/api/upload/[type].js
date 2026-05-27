@@ -132,33 +132,58 @@ function inferStructuredProductMeta(rawName, unit, explicit = {}) {
   }
 }
 
-// ── CSV/TSV row parser (handles simple quoted fields) ────────────────────────
-function parseCsvRow(line, sep) {
-  const cells = []
-  let cur = '', inQ = false
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]
+// ── Full CSV/TSV tokenizer (handles quoted fields with embedded newlines) ───
+// Returns an array of rows, each row an array of cell strings.
+// Critical: newlines inside quoted fields must NOT end a row. SheetJS
+// (and Excel) preserve in-cell newlines this way, so splitting by '\n'
+// before tokenizing corrupts multi-line cells.
+function parseCsvAll(text, sep) {
+  const rows = []
+  let row = []
+  let cur = ''
+  let inQ = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
     if (inQ) {
-      if (c === '"') { if (line[i+1] === '"') { cur += '"'; i++ } else inQ = false }
-      else cur += c
+      if (c === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i++ }
+        else inQ = false
+      } else {
+        cur += c
+      }
     } else {
-      if (c === '"') { inQ = true }
-      else if (c === sep) { cells.push(cur.trim()); cur = '' }
-      else cur += c
+      if (c === '"') {
+        inQ = true
+      } else if (c === sep) {
+        row.push(cur.trim()); cur = ''
+      } else if (c === '\n' || c === '\r') {
+        // End row only outside quotes; collapse \r\n into one terminator
+        if (c === '\r' && text[i + 1] === '\n') i++
+        row.push(cur.trim()); cur = ''
+        if (row.some(v => v.length > 0)) rows.push(row)
+        row = []
+      } else {
+        cur += c
+      }
     }
   }
-  cells.push(cur.trim())
-  return cells
+  if (cur.length > 0 || row.length > 0) {
+    row.push(cur.trim())
+    if (row.some(v => v.length > 0)) rows.push(row)
+  }
+  return rows
 }
 
 // ── Direct parser for Costarax price-list template (CSV or TSV) ─────────────
 // Detects the header row and parses without calling the AI.
 // Returns null if the text does not match the template format.
 function parseCostaraxTemplate(text, supplierName) {
-  const lines = text.split('\n').map(l => l.trimEnd()).filter(l => l.trim().length > 0)
-  if (lines.length < 2) return null
-  const sep = lines[0].includes('\t') ? '\t' : ','
-  const headers = parseCsvRow(lines[0].toLowerCase(), sep)
+  if (!text || text.length < 20) return null
+  const sep = text.indexOf('\t') > 0 && text.indexOf('\t') < text.indexOf('\n') ? '\t' : ','
+  const rows = parseCsvAll(text, sep)
+  if (rows.length < 2) return null
+
+  const headers = rows[0].map(h => (h || '').toLowerCase())
   const nameIdx  = headers.findIndex(h => h === 'product_name')
   const priceIdx = headers.findIndex(h => h === 'price_php')
   if (nameIdx === -1 || priceIdx === -1) return null  // not our template
@@ -180,16 +205,17 @@ function parseCostaraxTemplate(text, supplierName) {
   }
 
   const items = []
-  for (let i = 1; i < lines.length; i++) {
-    const cells = parseCsvRow(lines[i], sep)
-    const rawName = (cells[nameIdx] || '').trim()
-    const priceStr = (cells[priceIdx] || '').replace(/,/g, '').trim()
+  for (let i = 1; i < rows.length; i++) {
+    const cells = rows[i]
+    // Normalise multi-line cell content: collapse embedded newlines into a single space
+    const rawName = ((cells[nameIdx] || '').replace(/\s+/g, ' ')).trim()
+    const priceStr = ((cells[priceIdx] || '').replace(/,/g, '').replace(/\s+/g, ' ')).trim()
     const price = parseFloat(priceStr)
     if (!rawName || !isFinite(price) || price <= 0) continue
 
-    const unit = unitIdx >= 0 ? (cells[unitIdx] || '').trim() || 'kg' : 'kg'
+    const unit = unitIdx >= 0 ? (cells[unitIdx] || '').replace(/\s+/g, ' ').trim() || 'kg' : 'kg'
     const stockRaw = stockIdx >= 0 ? (cells[stockIdx] || '').trim() : ''
-    const notes = notesIdx >= 0 ? (cells[notesIdx] || '').trim() : ''
+    const notes = notesIdx >= 0 ? (cells[notesIdx] || '').replace(/\s+/g, ' ').trim() : ''
 
     const stockN = parseFloat(stockRaw)
     const stock = stockRaw === '' ? null : (isFinite(stockN) && stockN >= 0 ? stockN : null)
@@ -214,7 +240,7 @@ function parseCostaraxTemplate(text, supplierName) {
     })
   }
 
-  console.log('[price-list upload] template-parse: extracted', items.length, 'items from', lines.length - 1, 'data rows')
+  console.log('[price-list upload] template-parse: extracted', items.length, 'items from', rows.length - 1, 'data rows')
   return items.length > 0 ? items : null
 }
 
