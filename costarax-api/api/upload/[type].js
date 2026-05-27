@@ -512,13 +512,31 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
           }
           if (toCreate2.length) {
             const schemaSupportsMeta = await productMetadataSchemaSupported()
-            const insertPayload = toCreate2.map(({_price,_unit,_stock, ...p}) => {
+            // Deduplicate by (canonical_name, default_unit) — same product can appear
+            // multiple times with different prices; unique constraint forbids duplicate rows.
+            const uniq2Map = new Map()
+            for (const item of toCreate2) {
+              const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+              if (!uniq2Map.has(k)) uniq2Map.set(k, item)
+            }
+            const uniqueToCreate2 = Array.from(uniq2Map.values())
+            const insertPayload = uniqueToCreate2.map(({_price,_unit,_stock, ...p}) => {
               if (schemaSupportsMeta) return p
               const { producer, brand, cut_type, grade_spec, origin_series, form_factor, pack_weight, ...legacy } = p
               return legacy
             })
-            const { data: newP } = await supabaseAdmin.from('products').insert(insertPayload).select('id,canonical_name')
-            if (newP) newP.forEach((np,i) => priceRows2.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate2[i]._price, stock_qty: toCreate2[i]._stock, unit: toCreate2[i]._unit, active: true, updated_at: new Date().toISOString() }))
+            const { data: newP } = await supabaseAdmin.from('products')
+              .upsert(insertPayload, { onConflict: 'canonical_name,default_unit', ignoreDuplicates: false })
+              .select('id,canonical_name,default_unit')
+            if (newP) {
+              const idLookup2 = new Map()
+              newP.forEach(p => { idLookup2.set(`${p.canonical_name.toLowerCase()}__${(p.default_unit||'kg').toLowerCase()}`, p.id) })
+              toCreate2.forEach(item => {
+                const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+                const pid = idLookup2.get(k)
+                if (pid) priceRows2.push({ supplier_id: supplierId, product_id: pid, price_php: item._price, stock_qty: item._stock, unit: item._unit, active: true, updated_at: new Date().toISOString() })
+              })
+            }
           }
           let persistErr = null
           const dedupedPriceRows2 = collapsePriceRows(priceRows2)
@@ -767,16 +785,37 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
   let created = 0, insertError = null, upsertError = null
   if (toCreate.length) {
     const schemaSupportsMeta = await productMetadataSchemaSupported()
-    const insertPayload = toCreate.map(({ _price, _unit, _stock, ...p }) => {
+    // Deduplicate by (canonical_name, default_unit) before upsert.
+    // The same product can appear with two different prices in one upload;
+    // the unique constraint on products(canonical_name, default_unit) would
+    // reject the whole batch if we send duplicate rows.
+    const uniqMap = new Map()
+    for (const item of toCreate) {
+      const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+      if (!uniqMap.has(k)) uniqMap.set(k, item)
+    }
+    const uniqueToCreate = Array.from(uniqMap.values())
+    const insertPayload = uniqueToCreate.map(({ _price, _unit, _stock, ...p }) => {
       if (schemaSupportsMeta) return p
       const { producer, brand, cut_type, grade_spec, origin_series, form_factor, pack_weight, ...legacy } = p
       return legacy
     })
-    const { data: newProducts, error: iErr } = await supabaseAdmin.from('products').insert(insertPayload).select('id, canonical_name')
+    // Upsert: on conflict (canonical_name, default_unit) update the row so we
+    // get back the id whether the product is new or already existed in the catalog.
+    const { data: newProducts, error: iErr } = await supabaseAdmin.from('products')
+      .upsert(insertPayload, { onConflict: 'canonical_name,default_unit', ignoreDuplicates: false })
+      .select('id, canonical_name, default_unit')
     insertError = iErr?.message || null
     if (newProducts) {
       created = newProducts.length
-      newProducts.forEach((np, i) => priceRows.push({ supplier_id: supplierId, product_id: np.id, price_php: toCreate[i]._price, stock_qty: toCreate[i]._stock, unit: toCreate[i]._unit, active: true, updated_at: new Date().toISOString() }))
+      const idLookup = new Map()
+      newProducts.forEach(p => { idLookup.set(`${p.canonical_name.toLowerCase()}__${(p.default_unit||'kg').toLowerCase()}`, p.id) })
+      // Map ALL toCreate items (including duplicate canonicals) to their product_id
+      toCreate.forEach(item => {
+        const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+        const pid = idLookup.get(k)
+        if (pid) priceRows.push({ supplier_id: supplierId, product_id: pid, price_php: item._price, stock_qty: item._stock, unit: item._unit, active: true, updated_at: new Date().toISOString() })
+      })
     }
   }
 
