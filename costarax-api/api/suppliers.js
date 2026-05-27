@@ -110,6 +110,24 @@ module.exports = async (req, res) => {
         })
       }
 
+      if (action === 'delete_uploads') {
+        const uploadIds = normalizeUuidArray(body.upload_ids || body.upload_id)
+        if (!uploadIds.length) return res.status(400).json({ error: 'No upload selected' })
+
+        const { error } = await supabaseAdmin
+          .from('price_list_uploads')
+          .delete()
+          .eq('supplier_id', supplierId)
+          .in('id', uploadIds)
+        if (error) return res.status(500).json({ error: error.message })
+
+        const state = await buildSupplierProductsState(supplierId)
+        return res.status(200).json({
+          message: `Deleted ${uploadIds.length} upload histor${uploadIds.length > 1 ? 'ies' : 'y'}`,
+          state,
+        })
+      }
+
       if (action === 'update_stock') {
         const productId = body.product_id
         const stockQty = body.stock_qty === '' || body.stock_qty === undefined ? null : body.stock_qty
