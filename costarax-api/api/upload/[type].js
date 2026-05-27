@@ -205,6 +205,11 @@ function parseCostaraxTemplate(text, supplierName) {
   }
 
   const items = []
+  // Track (canonical, unit) occurrences so we can disambiguate true duplicates
+  // by appending " (2)", " (3)", … When a supplier lists the same product +
+  // unit twice with different prices, we treat each occurrence as a distinct
+  // catalog entry rather than letting collapsePriceRows silently drop one.
+  const seenKeyCount = new Map()
   for (let i = 1; i < rows.length; i++) {
     const cells = rows[i]
     // Normalise multi-line cell content: collapse embedded newlines into a single space
@@ -228,6 +233,12 @@ function parseCostaraxTemplate(text, supplierName) {
         canonical = `${notes} ${rawName}`
       }
     }
+
+    // Disambiguate duplicates: same canonical+unit with a different price gets " (N)"
+    const dedupKey = `${canonical.toLowerCase()}__${unit.toLowerCase()}`
+    const seenCount = seenKeyCount.get(dedupKey) || 0
+    if (seenCount > 0) canonical = `${canonical} (${seenCount + 1})`
+    seenKeyCount.set(dedupKey, seenCount + 1)
 
     items.push({
       name: rawName,
