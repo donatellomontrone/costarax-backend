@@ -308,6 +308,12 @@ async function handlePriceList(req, res) {
   if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured on server' })
 
   let extracted = []
+  // When true, the catalog match step uses exact canonical_name match only.
+  // This prevents the fuzzy matcher from collapsing distinct items in a
+  // structured template (e.g. "Sanchoku Tenderloin MS6-7" vs
+  // "Sanchoku Tenderloin MS4-5") onto a stale catalog entry from a
+  // previous upload, which then get further dedup'd by collapsePriceRows.
+  let useStrictMatching = false
   try {
     const ruleBlock = `Extract products from this price list. Return JSON array only.
 Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null,"producer":"optional","brand":"optional","cut_type":"optional","grade_spec":"optional","origin_series":"optional","form_factor":"optional","pack_weight":"optional"}
@@ -584,6 +590,7 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
       const tmplItems = parseCostaraxTemplate(text, supplierName)
       if (tmplItems && tmplItems.length > 0) {
         extracted = tmplItems
+        useStrictMatching = true  // template canonicals are deterministic — don't fuzzy match
         // Fall through to catalog lookup below — skip the AI call.
       } else {
         // 2. For large free-form text → chunked parallel AI calls.
@@ -705,7 +712,7 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
 
   if (!extracted.length) return res.status(422).json({ error: 'No products found in the file.' })
 
-  const { data: catalog } = await supabaseAdmin.from('products').select('id, canonical_name').eq('active', true)
+  const { data: catalog } = await supabaseAdmin.from('products').select('id, canonical_name, default_unit').eq('active', true)
   const products = catalog || []
   function normalize(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() }
   function tokens(s) { return normalize(s).split(' ').filter(t => t.length > 2) }
@@ -748,6 +755,21 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
     }
     return bestScore >= 0 ? best : null
   }
+  // Strict matcher: only matches when canonical_name AND default_unit are an
+  // exact (case-insensitive, normalized) match. Used for template uploads
+  // where the canonical name is deterministic and we don't want fuzzy
+  // matches collapsing distinct items.
+  const productsByExactKey = new Map()
+  if (useStrictMatching) {
+    for (const p of products) {
+      const k = `${normalize(p.canonical_name)}__${(p.default_unit||'').toLowerCase().trim()}`
+      productsByExactKey.set(k, p)
+    }
+  }
+  function matchProductStrict(canonical, unit) {
+    const k = `${normalize(canonical)}__${(unit||'').toLowerCase().trim()}`
+    return productsByExactKey.get(k) || null
+  }
 
   const VALID_CATEGORIES = ['meat', 'seafood', 'produce', 'dry', 'beverages', 'packaging']
   const validItems = collapseExtractedItems(extracted)
@@ -763,8 +785,10 @@ Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagy
   for (const item of validItems) {
     const canonicalName = (item.canonical || item.name).trim()
     const category_id = VALID_CATEGORIES.includes(item.category) ? item.category : 'dry'
-    const product = matchProduct(canonicalName)
     const unit = (item.unit || 'kg').trim()
+    const product = useStrictMatching
+      ? matchProductStrict(canonicalName, unit)
+      : matchProduct(canonicalName)
     const stock_qty = parseStock(item.stock)
     if (product) priceRows.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
     else {
