@@ -485,13 +485,21 @@ Supplier: ${supplierName}`
         }
         console.log('[price-list upload] pre-extracted', productLines.length, 'product lines (PDF was', pdfText.length, 'chars)')
 
-        // Chunk by product lines: 70 per chunk × max 10 chunks = 700 products.
-        // All chunks run in parallel; Haiku handles 70 clean lines well within
-        // 4000 tokens of output and 3–4 s latency.
-        const LINES_PER_CHUNK = 70
+        // Chunk by product lines. Each item's JSON (name, canonical, price,
+        // unit, category, producer, brand, cut_type, grade_spec,
+        // origin_series, form_factor, pack_weight, stock) is ~140-180
+        // output tokens. With LINES_PER_CHUNK=70 and max_tokens=6000 the
+        // AI's output silently truncated mid-chunk on dense lists like the
+        // Hightower 600-line PDF — we lost ~30 items per chunk × 9 chunks
+        // = ~200 products. New budget:
+        //   • 40 lines per chunk × 180 tok ≈ 7,200 → fits in 8,000
+        //   • 16 chunks max → 640 products capacity (was 700 but now actually
+        //     deliverable, not truncated)
+        const LINES_PER_CHUNK = 40
+        const MAX_CHUNKS = 16
         if (productLines.length > 0) {
           const chunks = []
-          for (let i = 0; i < productLines.length && chunks.length < 10; i += LINES_PER_CHUNK) {
+          for (let i = 0; i < productLines.length && chunks.length < MAX_CHUNKS; i += LINES_PER_CHUNK) {
             chunks.push(productLines.slice(i, i + LINES_PER_CHUNK).join('\n'))
           }
           const anthropicInner = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -499,17 +507,22 @@ Supplier: ${supplierName}`
           // each line is already "SECTION > Sub-group | Name Specs Brand Price/unit"
           const chunkRule = `${ruleBlock}
 Format: each line is one product. Lines may be prefixed with "SECTION > Sub-group | " context.
-Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").`
+Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").
+IMPORTANT: Every input line MUST become one item in the output JSON array. Do not skip lines. If you can't parse a line, still emit it with whatever fields you can extract.`
           const results = await Promise.all(chunks.map((chunk, idx) =>
             anthropicInner.messages.create({
               model,
-              max_tokens: 6000,
+              max_tokens: 8000,
               temperature: 0,
-              system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
+              system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
               messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
             }).then(r => {
               const text = r.content?.[0]?.text?.trim() || ''
-              console.log(`[price-list chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length}`)
+              const lineCount = chunk.split('\n').length
+              console.log(`[price-list chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount}`)
+              if (r.stop_reason === 'max_tokens') {
+                console.warn(`[price-list chunk ${idx}] ⚠ OUTPUT TRUNCATED at max_tokens — items lost`)
+              }
               return text
             }).catch(e => { console.error(`[price-list chunk ${idx}] FAILED:`, e.message); return '' })
           ))
