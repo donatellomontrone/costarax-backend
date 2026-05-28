@@ -572,49 +572,27 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           console.log('[price-list upload] extracted after dedup+filter:', extracted.length)
           // Skip the normal single-call path below
           if (!extracted.length) throw new Error('No products could be extracted from the PDF text.')
-          // Jump straight to DB upsert — bypass the single-call code
-          const catalog2 = await supabaseAdmin.from('products').select('id, canonical_name').eq('active', true)
+          // Jump straight to DB upsert — bypass the single-call code.
+          // Strict (canonical_name, default_unit) match against the catalog —
+          // mirrors the XLSX template path. The previous fuzzy matcher
+          // collapsed multiple AI-generated canonicals onto the same stale
+          // catalog product_id; collapsePriceRows then dropped the
+          // duplicates (we lost ~150 of 581 items on the Hightower PDF).
+          // With strict match each distinct (canonical, unit) gets its own
+          // product row, exact re-uploads find the existing row, and
+          // similar-but-different items create new products instead of
+          // collapsing.
+          const catalog2 = await supabaseAdmin.from('products').select('id, canonical_name, default_unit').eq('active', true)
           const products2 = catalog2.data || []
           function normalize2(s) { return (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim() }
-          function tokens2(s) { return normalize2(s).split(' ').filter(t => t.length > 2) }
-          const CUT_START_RX2 = /\b(strip\s*loin|striploin|rib\s*eye|ribeye|cube\s*roll|tenderloin|short\s*loin|sirloin|porterhouse|t-bone|tomahawk|chuck\s*roll|strip|loin|butter|salami|cheese|wagyu)\b/i
-          function extractLeadingQualifier2(name) {
-            const raw = String(name || '').replace(/\s+/g, ' ').trim()
-            if (!raw) return ''
-            const match = raw.match(CUT_START_RX2)
-            if (!match || match.index <= 0) return ''
-            return normalize2(raw.slice(0, match.index))
+          const productsByExactKey2 = new Map()
+          for (const p of products2) {
+            const k = `${normalize2(p.canonical_name)}__${(p.default_unit||'').toLowerCase().trim()}`
+            productsByExactKey2.set(k, p)
           }
-          function leadingQualifierCompatible2(needleName, hayName) {
-            const needleQualifier = extractLeadingQualifier2(needleName)
-            if (!needleQualifier) return true
-            const hayQualifier = extractLeadingQualifier2(hayName)
-            if (!hayQualifier) return false
-            return hayQualifier.includes(needleQualifier) || needleQualifier.includes(hayQualifier)
-          }
-          function scoreProductMatch2(needleName, hayName) {
-            const needle = normalize2(needleName), hay = normalize2(hayName)
-            if (!needle || !hay) return -1
-            if (!leadingQualifierCompatible2(needleName, hayName)) return -1
-            if (hay === needle) return 1000
-            if (hay.includes(needle) && needle.length >= 12) return 950 - Math.max(0, hay.length - needle.length)
-            const nt = tokens2(needle), ht = tokens2(hay)
-            if (!nt.length || !ht.length) return -1
-            if (nt.length < 3) return -1
-            const shared = nt.filter(t => ht.includes(t))
-            const needleRatio = shared.length / nt.length
-            const hayRatio = shared.length / ht.length
-            if (needleRatio < 0.8) return -1
-            if ((nt.length >= 4 && hayRatio < 0.45) || (nt.length < 4 && hayRatio < 0.6)) return -1
-            return needleRatio * 100 + hayRatio * 10 - Math.abs(ht.length - nt.length)
-          }
-          function matchProduct2(canonical) {
-            let best = null, bestScore = -1
-            for (const p of products2) {
-              const score = scoreProductMatch2(canonical, p.canonical_name)
-              if (score > bestScore) { best = p; bestScore = score }
-            }
-            return bestScore >= 0 ? best : null
+          function matchProductStrict2(canonical, unit) {
+            const k = `${normalize2(canonical)}__${(unit||'').toLowerCase().trim()}`
+            return productsByExactKey2.get(k) || null
           }
           const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
           const validItems2 = collapseExtractedItems(extracted)
@@ -623,8 +601,8 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           for (const item of validItems2) {
             const canonicalName = (item.canonical||item.name).trim()
             const category_id = VALID_CATS.includes(item.category) ? item.category : 'dry'
-            const product = matchProduct2(canonicalName)
             const unit = (item.unit||'kg').trim()
+            const product = matchProductStrict2(canonicalName, unit)
             const stock_qty = parseStock2(item.stock)
             if (product) priceRows2.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
             else {
