@@ -353,11 +353,24 @@ async function handlePriceList(req, res) {
   let useStrictMatching = false
   try {
     const ruleBlock = `Extract products from this price list. Return JSON array only.
-Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null,"producer":"optional","brand":"optional","cut_type":"optional","grade_spec":"optional","origin_series":"optional","form_factor":"optional","pack_weight":"optional"}
-Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2).
-Canonical naming rules: keep the cut + grade/marble score + brand + origin/series + distinguishing form factor (bone-in/boneless/halves/roll/center cut) + pack/weight band when present. Never collapse different brands, grades, or size bands into the same canonical name. If two lines differ by brand/grade/series/weight, they must become different canonical names. Example: "Creek Farm Striploin Grade 9 Grass Fed" must keep "Creek Farm" in canonical and must not become only "Striploin Grade 9 Grass Fed".
+Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null,"producer":"REQUIRED if any brand/producer is mentioned","brand":"REQUIRED if any brand is mentioned","cut_type":"optional","grade_spec":"optional","origin_series":"optional","form_factor":"optional","pack_weight":"optional"}
+Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2, MS6-7=Marble Score 6-7).
+CRITICAL Canonical naming rules — read carefully:
+1. canonical MUST start with the brand/producer if one is mentioned (e.g. "Mayura", "Sanchoku", "Wagstaff", "Hardwick", "Pasture Fresh", "Signature Black Angus", "Augustus", "Diamantina", "Futari", "Seara", "Aurora", "Litera", "Cranswick"). Look at the rightmost column / end of each row — that's typically the brand.
+2. canonical MUST include the grade/marble score / series if present in section context (e.g. "Platinum Label MB9+", "Signature Series MB8-9+", "F1 Wagyu", "F4 Wagyu", "Angus", "Grain Fed", "Full Blood Wagyu") — these come from the line prefix "SECTION > Subgroup | ..."
+3. canonical MUST include distinguishing form factor (bone-in/boneless/halves/roll/center cut/Frenched/Chump On/Netted)
+4. canonical MUST include pack/weight band when present
+5. Two rows with the same cut but different brand/grade/series/weight MUST produce different canonicals. Never collapse them.
+Examples (correct):
+- "Mayura Platinum Label Tenderloin MB9+" vs "Mayura Signature Series Tenderloin MB8-9+" (same brand, different grade)
+- "Hardwick Australian Lamb Rack Frenched Bone In" vs "Wagstaff Australian Lamb Rack Frenched Bone In" (same cut, different brand)
+- "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7" vs "Sanchoku F1 Wagyu Tenderloin Marble Score 4-5"
+Examples (WRONG — never produce these):
+- "Tenderloin" (missing brand + grade)
+- "Lamb Rack Frenched" (missing brand)
+- "Mayura Tenderloin" when two grades exist (missing grade)
 stock rules: if the source row has a stock/qty/available/inventory column with a number, return that number. If the row explicitly says "out of stock" / "OOS" / "sold out", return 0. Otherwise return null (do not guess).
-Category rules: meat=pork/beef/chicken/poultry, seafood=fish/shrimp/squid, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices, beverages=drinks/juice/water, packaging=boxes/bags/containers.
+Category rules: meat=beef/lamb/pork/chicken/poultry/foie gras, seafood=fish/shrimp/squid/scallop/oyster/crab, produce=vegetables/fruits/eggs/potato products, dry=rice/flour/oil/canned/spices/pasta/condiments, beverages=drinks/juice/water/coffee/milk, packaging=boxes/bags/containers.
 Supplier: ${supplierName}`
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -406,10 +419,27 @@ Supplier: ${supplierName}`
         // well as fullwidth "／ｋｇ" (Japanese price lists) and tolerates a
         // space between the decimal and the slash ("5,500.00 / kg").
         const PRICE_LINE_RX = /\d[\d,]*\.\d{2}\s*[\/／]\s*\S/
-        const PAGE_HDR_RX   = /\+63|@|phone:|fax:|email:|Parañaque|Manila|Philippines/i
-        const COL_HDR_RX    = /^Product Description[\s\t]+(Specs|Marble|Grade|Origin|Brand)/i
-        const SECTION_RX    = /^[A-Z][A-Z\s\-\/&"]+[A-Z]\s*$/  // ALL-CAPS section headers
+        // Aggressive page-header filter: catches phone, email, addresses, page
+        // numbers, street tokens that recur on every page of structured PDFs.
+        const PAGE_HDR_RX = /\+63|@|^phone:?$|^fax:?$|^email:?$|Parañaque|Metro Manila|^1700\s|Philippines|^Page\b|San Victores|Seacom|San Antonio|^\d{1,3}$/i
+        const COL_HDR_RX  = /^Product Description[\s\t]+(Specs|Marble|Grade|Origin|Brand)/i
+        const SECTION_RX  = /^[A-Z][A-Z\s\-\/&"]+[A-Z]\s*$/  // ALL-CAPS section headers
         const PRODUCT_SHAPE_RX = /(?:\d+(?:\.\d+)?\s*(?:kg|g|lb|oz)\s*\/\s*(?:slab|pc|pack|bone|case|box|tray)|\b(?:bone in|boneless|tenderloin|strip loin|rib eye|cube roll|short loin|sirloin|tomahawk|rack loin|loin ribs|chuck roll)\b)/i
+        // A "subgroup" line is something like "Platinum Label MB9+",
+        // "Signature Series MB8-9+", "F1 Wagyu", "Angus", "Grain Fed",
+        // "Australian Lamb", "Australian Beef", "Full Blood Wagyu" — the
+        // sub-header that describes the grade/origin/brand of the rows
+        // that follow it. They usually contain capitalised words and are
+        // short (< 60 chars). We require at least one capitalised word
+        // so we don't accidentally pick up stray fragments.
+        const looksLikeSubgroup = (line) => {
+          if (line.length < 3 || line.length >= 60) return false
+          if (PRODUCT_SHAPE_RX.test(line)) return false
+          if (PAGE_HDR_RX.test(line)) return false
+          // At least one capitalised word
+          if (!/[A-Z][a-zA-Z+]+/.test(line)) return false
+          return true
+        }
         const rawLines = pdfText.split('\n').map(l => l.trim())
         let curSection = '', curSubgroup = ''
         const productLines = []
@@ -423,11 +453,6 @@ Supplier: ${supplierName}`
             // product block as context. No fixed line limit — column-based
             // PDFs (e.g. Japanese price lists) can spread one product over
             // 20+ lines.
-            //
-            // Cap at 50 lines / 700 chars total so the AI prompt stays clean.
-            // We do NOT stop on SECTION_RX during the backtrack: in many
-            // PDFs an ALL-CAPS line like "SASHIMI GRADE" is per-product
-            // metadata rather than a real section header.
             let combinedLine = line
             if (line.length < 40) {
               const ctx = []
@@ -448,9 +473,14 @@ Supplier: ${supplierName}`
             // Prefix with section + sub-group context so AI can form proper canonical names
             const prefix = [curSection, curSubgroup].filter(Boolean).join(' > ')
             productLines.push(prefix ? `${prefix} | ${combinedLine}` : combinedLine)
-            curSubgroup = '' // reset after attaching to this product
-          } else if (line.length > 2 && line.length < 70 && !PRODUCT_SHAPE_RX.test(line)) {
-            curSubgroup = line  // likely a grade/breed sub-header (e.g. "F1 Wagyu", "Angus")
+            // ⚠️ DO NOT reset curSubgroup here. The sub-header (e.g. "Platinum
+            // Label MB9+") applies to EVERY product underneath it until a new
+            // section/subgroup appears. Resetting after each product caused
+            // the 2nd, 3rd... product under each grade to lose its grade
+            // context, which made the AI produce duplicate canonicals and
+            // triggered fake "(2)" auto-renames.
+          } else if (looksLikeSubgroup(line)) {
+            curSubgroup = line  // grade/breed/origin sub-header
           }
         }
         console.log('[price-list upload] pre-extracted', productLines.length, 'product lines (PDF was', pdfText.length, 'chars)')
