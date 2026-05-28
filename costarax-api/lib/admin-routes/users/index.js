@@ -404,11 +404,49 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Cannot delete another super-admin. Demote them first.' })
     }
 
-    // Best-effort cleanup of org_members; auth user delete cascades to profiles.
-    try { await supabaseAdmin.from('organization_members').delete().eq('user_id', id) } catch (_) {}
+    // Pre-delete cleanup. Supabase's `auth.admin.deleteUser` only cascades to
+    // rows referencing `auth.users(id)` with ON DELETE CASCADE. Tables that
+    // reference the user with NO ACTION / RESTRICT will return the opaque
+    // "Database error deleting user". We proactively scrub the most common
+    // references so the auth delete succeeds. Each is best-effort — never
+    // block the delete just because one cleanup failed.
+    const cleanupSteps = [
+      ['organization_members', 'user_id'],
+      ['support_messages',     'user_id'],
+      ['support_messages',     'admin_id'],
+      ['support_threads',      'user_id'],
+      ['support_threads',      'assigned_admin_id'],
+      ['admin_actions',        'admin_id'],
+      ['notifications',        'user_id'],
+      ['saved_searches',       'user_id'],
+      ['watchlist',            'user_id'],
+      ['rate_limits',          'user_id'],
+      ['rfq_drafts',           'user_id'],
+      ['profiles',             'id'],
+    ]
+    const cleanupErrors = []
+    for (const [tbl, col] of cleanupSteps) {
+      try {
+        const { error: delErr } = await supabaseAdmin.from(tbl).delete().eq(col, id)
+        if (delErr && !/relation .* does not exist|column .* does not exist/i.test(delErr.message || '')) {
+          cleanupErrors.push(`${tbl}.${col}: ${delErr.message}`)
+        }
+      } catch (e) {
+        cleanupErrors.push(`${tbl}.${col}: ${e.message || e}`)
+      }
+    }
 
     const { error } = await supabaseAdmin.auth.admin.deleteUser(id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) {
+      const detail = cleanupErrors.length
+        ? ` Cleanup issues: ${cleanupErrors.slice(0, 3).join(' · ')}`
+        : ' This usually means another table still references the user. Check Supabase logs.'
+      return res.status(500).json({
+        error: error.message || 'Database error deleting user',
+        detail: detail.trim(),
+        cleanupErrors,
+      })
+    }
 
     try {
       await supabaseAdmin.from('admin_actions').insert({

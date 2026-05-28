@@ -415,11 +415,28 @@ module.exports = async (req, res) => {
       const orgMember = await resolveSupplierMembership(supabaseAdmin, user.id, user.email)
       if (!orgMember?.supplier_id) return res.status(404).json({ error: 'No supplier linked to this user' })
 
-      const { data: supplier, error: ownErr } = await supabaseAdmin
-        .from('suppliers')
-        .select('id,name,category,categories,tagline,city,region,minimum_order_php,rating,review_count,verified,active,vat_registered,payment_terms,credit_terms,plan,contact_name,contact_phone,contact_email,delivery_days,lead_time_days,cold_chain,years_in_business,price_validity_days,sample_available,delivery_areas,description,certifications,logo_url,status')
-        .eq('id', orgMember.supplier_id)
-        .maybeSingle()
+      let supplier = null
+      let ownErr = null
+      // Try with subscription_plan; fall back if column missing
+      {
+        const r = await supabaseAdmin
+          .from('suppliers')
+          .select('id,name,category,categories,tagline,city,region,minimum_order_php,rating,review_count,verified,active,vat_registered,payment_terms,credit_terms,plan,subscription_plan,contact_name,contact_phone,contact_email,delivery_days,lead_time_days,cold_chain,years_in_business,price_validity_days,sample_available,delivery_areas,description,certifications,logo_url,status')
+          .eq('id', orgMember.supplier_id)
+          .maybeSingle()
+        if (r.error && /subscription_plan/i.test(r.error.message || '')) {
+          const fb = await supabaseAdmin
+            .from('suppliers')
+            .select('id,name,category,categories,tagline,city,region,minimum_order_php,rating,review_count,verified,active,vat_registered,payment_terms,credit_terms,plan,contact_name,contact_phone,contact_email,delivery_days,lead_time_days,cold_chain,years_in_business,price_validity_days,sample_available,delivery_areas,description,certifications,logo_url,status')
+            .eq('id', orgMember.supplier_id)
+            .maybeSingle()
+          ownErr = fb.error
+          supplier = fb.data ? { ...fb.data, subscription_plan: 'basic' } : null
+        } else {
+          ownErr = r.error
+          supplier = r.data ? { ...r.data, subscription_plan: r.data.subscription_plan || 'basic' } : null
+        }
+      }
 
       if (ownErr) return res.status(500).json({ error: ownErr.message })
       if (!supplier) return res.status(404).json({ error: 'Supplier record not found' })
@@ -427,25 +444,46 @@ module.exports = async (req, res) => {
     }
 
     // ── 2) Suppliers (active + approved) ─────────────────────────────────
+    // Include subscription_plan so the buyer-side can rank corporate > pro >
+    // basic and surface "Featured" / "Premium" badges. Falls back gracefully
+    // when the column hasn't been migrated yet.
     const { data: suppliers, error } = await supabaseAdmin
       .from('suppliers')
-      .select('id,name,category,tagline,city,region,minimum_order_php,rating,review_count,verified,plan,active,vat_registered,cold_chain,years_in_business,logo_url')
+      .select('id,name,category,tagline,city,region,minimum_order_php,rating,review_count,verified,plan,subscription_plan,active,vat_registered,cold_chain,years_in_business,logo_url')
       .eq('active', true)
       .eq('status', 'approved')
 
     if (error) {
-      // Fall back to a leaner select if logo_url column doesn't exist yet
-      if (/column .*logo_url.* does not exist|Could not find/i.test(error.message || '')) {
+      const msg = error.message || ''
+      // subscription_plan column missing — retry without it (default to basic)
+      if (/subscription_plan/i.test(msg)) {
         const r = await supabaseAdmin.from('suppliers')
-          .select('id,name,category,tagline,city,region,minimum_order_php,rating,review_count,verified,plan,active,vat_registered,cold_chain,years_in_business')
+          .select('id,name,category,tagline,city,region,minimum_order_php,rating,review_count,verified,plan,active,vat_registered,cold_chain,years_in_business,logo_url')
+          .eq('active', true).eq('status', 'approved')
+        if (r.error) {
+          if (/column .*logo_url.* does not exist|Could not find/i.test(r.error.message || '')) {
+            const r2 = await supabaseAdmin.from('suppliers')
+              .select('id,name,category,tagline,city,region,minimum_order_php,rating,review_count,verified,plan,active,vat_registered,cold_chain,years_in_business')
+              .eq('active', true).eq('status', 'approved')
+            if (r2.error) return res.status(500).json({ error: r2.error.message })
+            return respond(res, (r2.data || []).map(s => ({ ...s, subscription_plan: 'basic' })))
+          }
+          return res.status(500).json({ error: r.error.message })
+        }
+        return respond(res, (r.data || []).map(s => ({ ...s, subscription_plan: 'basic' })))
+      }
+      // Fall back to a leaner select if logo_url column doesn't exist yet
+      if (/column .*logo_url.* does not exist|Could not find/i.test(msg)) {
+        const r = await supabaseAdmin.from('suppliers')
+          .select('id,name,category,tagline,city,region,minimum_order_php,rating,review_count,verified,plan,subscription_plan,active,vat_registered,cold_chain,years_in_business')
           .eq('active', true).eq('status', 'approved')
         if (r.error) return res.status(500).json({ error: r.error.message })
-        return respond(res, r.data || [])
+        return respond(res, (r.data || []).map(s => ({ ...s, subscription_plan: s.subscription_plan || 'basic' })))
       }
       return res.status(500).json({ error: error.message })
     }
 
-    return respond(res, suppliers || [])
+    return respond(res, (suppliers || []).map(s => ({ ...s, subscription_plan: s.subscription_plan || 'basic' })))
   } catch (fatalErr) {
     console.error('[suppliers] Unhandled error:', fatalErr.message)
     return res.status(500).json({ error: 'Internal server error', detail: fatalErr.message })

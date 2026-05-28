@@ -13,10 +13,17 @@ module.exports = async (req, res) => {
       const body = req.body || {}
       const allowed = ['name', 'category', 'categories', 'tagline', 'description', 'city', 'region',
                        'minimum_order_php', 'tin', 'delivery_coverage', 'delivery_areas', 'verified',
-                       'active', 'status', 'plan', 'vat_registered', 'payment_terms', 'credit_terms',
-                       'contact_name', 'contact_phone', 'contact_email', 'delivery_days', 'lead_time_days',
-                       'cold_chain', 'years_in_business', 'price_validity_days', 'sample_available',
-                       'certifications', 'bir_registration', 'trial_ends_at']
+                       'active', 'status', 'plan', 'subscription_plan', 'vat_registered', 'payment_terms',
+                       'credit_terms', 'contact_name', 'contact_phone', 'contact_email', 'delivery_days',
+                       'lead_time_days', 'cold_chain', 'years_in_business', 'price_validity_days',
+                       'sample_available', 'certifications', 'bir_registration', 'trial_ends_at']
+
+      // Validate plan value if provided — DB has a CHECK constraint, but reject
+      // early with a clear message so admin sees the issue immediately.
+      if (body.subscription_plan !== undefined &&
+          !['basic','pro','corporate'].includes(body.subscription_plan)) {
+        return res.status(400).json({ error: `Invalid subscription_plan "${body.subscription_plan}". Must be basic, pro, or corporate.` })
+      }
       const updates = {}
       for (const key of allowed) {
         if (body[key] !== undefined) updates[key] = body[key]

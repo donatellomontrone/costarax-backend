@@ -10,11 +10,28 @@ module.exports = async (req, res) => {
     const { data: authData, error: authErr } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
     if (authErr) return res.status(500).json({ error: authErr.message })
 
-    const { data: sups, error } = await supabaseAdmin
-      .from('suppliers')
-      .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at, trial_ends_at, logo_url')
-      .order('name')
-    if (error) return res.status(500).json({ error: error.message })
+    let sups = []
+    {
+      // Try the rich select including subscription_plan. If the column doesn't
+      // exist yet (migrations/subscription_plan.sql not applied), fall back
+      // to the legacy select so the admin panel still works.
+      const tryRich = await supabaseAdmin
+        .from('suppliers')
+        .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, subscription_plan, created_at, trial_ends_at, logo_url')
+        .order('name')
+      if (tryRich.error && /subscription_plan/i.test(tryRich.error.message || '')) {
+        const fb = await supabaseAdmin
+          .from('suppliers')
+          .select('id, name, category, tagline, city, region, minimum_order_php, rating, verified, active, status, plan, created_at, trial_ends_at, logo_url')
+          .order('name')
+        if (fb.error) return res.status(500).json({ error: fb.error.message })
+        sups = (fb.data || []).map(s => ({ ...s, subscription_plan: 'basic' }))
+      } else if (tryRich.error) {
+        return res.status(500).json({ error: tryRich.error.message })
+      } else {
+        sups = (tryRich.data || []).map(s => ({ ...s, subscription_plan: s.subscription_plan || 'basic' }))
+      }
+    }
 
     const ids = (sups || []).map(s => s.id)
     let subs = [], orgMembers = []
