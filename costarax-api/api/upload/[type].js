@@ -485,23 +485,48 @@ Supplier: ${supplierName}`
         }
         console.log('[price-list upload] pre-extracted', productLines.length, 'product lines (PDF was', pdfText.length, 'chars)')
 
+        // ── Diagnostics container ───────────────────────────────────────────
+        // Tracks every step of the pipeline so the response tells us EXACTLY
+        // where products disappear (PDF → AI → dedup → matching → DB). Without
+        // this we were tuning blind: 581 in the PDF, 328 saved, 250 lost
+        // somewhere across 7 possible drop points.
+        const dx = {
+          pdf_text_chars: pdfText.length,
+          pdf_raw_lines: rawLines.length,
+          product_lines_after_prefilter: productLines.length,
+          chunks_total: 0,
+          chunks_succeeded: 0,
+          chunks_failed: 0,
+          chunks_truncated: 0,
+          failed_chunk_ids: [],
+          truncated_chunk_ids: [],
+          chunk_input_lines_total: 0,
+          chunk_items_emitted_total: 0,
+          ai_items_raw: 0,
+          after_canonical_dedup: 0,
+          after_autorename: 0,
+        }
+
         // Chunk by product lines. Each item's JSON (name, canonical, price,
         // unit, category, producer, brand, cut_type, grade_spec,
         // origin_series, form_factor, pack_weight, stock) is ~140-180
-        // output tokens. With LINES_PER_CHUNK=70 and max_tokens=6000 the
-        // AI's output silently truncated mid-chunk on dense lists like the
-        // Hightower 600-line PDF — we lost ~30 items per chunk × 9 chunks
-        // = ~200 products. New budget:
-        //   • 40 lines per chunk × 180 tok ≈ 7,200 → fits in 8,000
-        //   • 16 chunks max → 640 products capacity (was 700 but now actually
-        //     deliverable, not truncated)
+        // output tokens. With LINES_PER_CHUNK=40 × max_tokens=8000 the
+        // output fits comfortably. 16 chunks × 40 lines = 640 product capacity.
         const LINES_PER_CHUNK = 40
         const MAX_CHUNKS = 16
+        // Wave size: how many chunks to fire in parallel before waiting.
+        // Anthropic returns HTTP 429 when too many concurrent requests hit
+        // simultaneously; the .catch() then swallows the error and that whole
+        // chunk's products disappear silently. Waves of 8 mean at most 2
+        // waves for a 16-chunk PDF (~5-7 s wall time, fits Vercel's 10 s).
+        const WAVE_SIZE = 8
+
         if (productLines.length > 0) {
           const chunks = []
           for (let i = 0; i < productLines.length && chunks.length < MAX_CHUNKS; i += LINES_PER_CHUNK) {
             chunks.push(productLines.slice(i, i + LINES_PER_CHUNK).join('\n'))
           }
+          dx.chunks_total = chunks.length
           const anthropicInner = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
           // Simplified prompt for clean pre-processed input:
           // each line is already "SECTION > Sub-group | Name Specs Brand Price/unit"
@@ -509,37 +534,66 @@ Supplier: ${supplierName}`
 Format: each line is one product. Lines may be prefixed with "SECTION > Sub-group | " context.
 Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").
 IMPORTANT: Every input line MUST become one item in the output JSON array. Do not skip lines. If you can't parse a line, still emit it with whatever fields you can extract.`
-          const results = await Promise.all(chunks.map((chunk, idx) =>
-            anthropicInner.messages.create({
-              model,
-              max_tokens: 8000,
-              temperature: 0,
-              system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
-              messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
-            }).then(r => {
+
+          // Run chunks in waves to avoid rate-limit cliff.
+          const callChunk = async (chunk, idx) => {
+            const lineCount = chunk.split('\n').length
+            dx.chunk_input_lines_total += lineCount
+            try {
+              const r = await anthropicInner.messages.create({
+                model,
+                max_tokens: 8000,
+                temperature: 0,
+                system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
+                messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
+              })
               const text = r.content?.[0]?.text?.trim() || ''
-              const lineCount = chunk.split('\n').length
+              const truncated = r.stop_reason === 'max_tokens'
               console.log(`[price-list chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount}`)
-              if (r.stop_reason === 'max_tokens') {
+              if (truncated) {
                 console.warn(`[price-list chunk ${idx}] ⚠ OUTPUT TRUNCATED at max_tokens — items lost`)
+                dx.chunks_truncated += 1
+                dx.truncated_chunk_ids.push(idx)
               }
-              return text
-            }).catch(e => { console.error(`[price-list chunk ${idx}] FAILED:`, e.message); return '' })
-          ))
-          // Merge all chunk results
+              dx.chunks_succeeded += 1
+              return { idx, text, lines_in: lineCount }
+            } catch (e) {
+              const tag = e.status === 429 ? 'RATE_LIMITED' : (e.status ? `HTTP_${e.status}` : 'ERROR')
+              console.error(`[price-list chunk ${idx}] ${tag}:`, e.message)
+              dx.chunks_failed += 1
+              dx.failed_chunk_ids.push({ idx, error: e.message, status: e.status || null })
+              return { idx, text: '', lines_in: lineCount }
+            }
+          }
+          const results = []
+          for (let waveStart = 0; waveStart < chunks.length; waveStart += WAVE_SIZE) {
+            const wave = chunks.slice(waveStart, waveStart + WAVE_SIZE)
+            const waveResults = await Promise.all(wave.map((chunk, j) => callChunk(chunk, waveStart + j)))
+            results.push(...waveResults)
+          }
+
+          // Merge all chunk results — count items emitted per chunk so we know
+          // which chunks under-produced (truncation, partial JSON parse, etc).
           const allItems = []
-          for (const chunkContent of results) {
-            if (!chunkContent) continue
-            const m = chunkContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || chunkContent.match(/(\[[\s\S]*)/)
-            let raw = m ? (m[1] || m[0]).trim() : chunkContent.trim()
+          for (const { idx, text } of results) {
+            if (!text) continue
+            const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || text.match(/(\[[\s\S]*)/)
+            let raw = m ? (m[1] || m[0]).trim() : text.trim()
             if (!raw.startsWith('[')) raw = '[' + raw
             if (!raw.trimEnd().endsWith(']')) {
               const last = raw.lastIndexOf('},')
               raw = (last > 0 ? raw.slice(0, last + 1) : raw) + ']'
             }
-            try { const items = JSON.parse(raw); allItems.push(...items) } catch (_) {}
+            try {
+              const items = JSON.parse(raw)
+              dx.chunk_items_emitted_total += items.length
+              allItems.push(...items)
+            } catch (_) {
+              console.warn(`[price-list chunk ${idx}] JSON parse failed, items lost`)
+            }
           }
-          console.log('[price-list upload] total items before dedup:', allItems.length)
+          dx.ai_items_raw = allItems.length
+          console.log('[price-list upload] total items before dedup:', allItems.length, 'diagnostics so far:', JSON.stringify(dx))
           // Deduplicate by CANONICAL name + unit + price (not name).
           // Many products share the same base cut name ("Tenderloin", "Chuck Roll")
           // but are distinct entries because they differ in brand/grade/origin.
@@ -556,9 +610,11 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             seen.add(key)
             return price > 0
           })
+          dx.after_canonical_dedup = filtered.length
           // Auto-rename duplicates that share canonical+unit with different prices:
           // append " (2)", " (3)", … so each gets a distinct product row.
           // Without this, collapsePriceRows would drop all but one price.
+          let renameCount = 0
           const seenKeyCountPdf = new Map()
           extracted = filtered.map(i => {
             const c = (i.canonical || i.name || '').trim()
@@ -566,10 +622,12 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             const k = `${c.toLowerCase()}__${u.toLowerCase()}`
             const n = seenKeyCountPdf.get(k) || 0
             seenKeyCountPdf.set(k, n + 1)
-            if (n > 0) return { ...i, canonical: `${c} (${n + 1})` }
+            if (n > 0) { renameCount += 1; return { ...i, canonical: `${c} (${n + 1})` } }
             return i
           })
-          console.log('[price-list upload] extracted after dedup+filter:', extracted.length)
+          dx.after_autorename = extracted.length
+          dx.autorenamed_count = renameCount
+          console.log('[price-list upload] extracted after dedup+filter:', extracted.length, 'renamed:', renameCount)
           // Skip the normal single-call path below
           if (!extracted.length) throw new Error('No products could be extracted from the PDF text.')
           // Jump straight to DB upsert — bypass the single-call code.
@@ -596,16 +654,24 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           }
           const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
           const validItems2 = collapseExtractedItems(extracted)
+          dx.after_collapse_extracted = validItems2.length
+          dx.catalog_size = products2.length
           const toCreate2 = [], priceRows2 = []
           const parseStock2 = (v) => { if (v===null||v===undefined||v==='') return null; const n=Number(v); return Number.isFinite(n)&&n>=0?n:null }
+          // Track how many distinct items hit the SAME existing product_id —
+          // if two AI-distinct canonicals collapse to one catalog row, the
+          // second one's price will be lost by collapsePriceRows later.
+          const matchedProductIdCounts = new Map()
           for (const item of validItems2) {
             const canonicalName = (item.canonical||item.name).trim()
             const category_id = VALID_CATS.includes(item.category) ? item.category : 'dry'
             const unit = (item.unit||'kg').trim()
             const product = matchProductStrict2(canonicalName, unit)
             const stock_qty = parseStock2(item.stock)
-            if (product) priceRows2.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
-            else {
+            if (product) {
+              matchedProductIdCounts.set(product.id, (matchedProductIdCounts.get(product.id) || 0) + 1)
+              priceRows2.push({ supplier_id: supplierId, product_id: product.id, price_php: parseFloat(item.price), stock_qty, unit, active: true, updated_at: new Date().toISOString() })
+            } else {
               const meta = inferStructuredProductMeta(canonicalName, unit, item)
               toCreate2.push({
                 canonical_name: canonicalName,
@@ -619,6 +685,12 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
               })
             }
           }
+          dx.matched_existing_items = priceRows2.length
+          dx.to_create_items = toCreate2.length
+          // How many existing-product collisions? (≥2 AI items → same catalog id)
+          const collisionPairs = [...matchedProductIdCounts.values()].filter(n => n > 1)
+          dx.match_collisions = collisionPairs.length
+          dx.items_lost_to_match_collisions = collisionPairs.reduce((a, n) => a + (n - 1), 0)
           if (toCreate2.length) {
             const schemaSupportsMeta = await productMetadataSchemaSupported()
             // Deduplicate by (canonical_name, default_unit) — same product can appear
@@ -629,26 +701,38 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
               if (!uniq2Map.has(k)) uniq2Map.set(k, item)
             }
             const uniqueToCreate2 = Array.from(uniq2Map.values())
+            dx.to_create_after_dedup = uniqueToCreate2.length
+            dx.to_create_dropped_by_dedup = toCreate2.length - uniqueToCreate2.length
             const insertPayload = uniqueToCreate2.map(({_price,_unit,_stock, ...p}) => {
               if (schemaSupportsMeta) return p
               const { producer, brand, cut_type, grade_spec, origin_series, form_factor, pack_weight, ...legacy } = p
               return legacy
             })
-            const { data: newP } = await supabaseAdmin.from('products')
+            const { data: newP, error: upsertErr } = await supabaseAdmin.from('products')
               .upsert(insertPayload, { onConflict: 'canonical_name,default_unit', ignoreDuplicates: false })
               .select('id,canonical_name,default_unit')
+            if (upsertErr) {
+              console.error('[price-list upload] products upsert FAILED:', upsertErr.message)
+              dx.products_upsert_error = upsertErr.message
+            }
+            dx.products_upserted = newP?.length || 0
             if (newP) {
               const idLookup2 = new Map()
               newP.forEach(p => { idLookup2.set(`${p.canonical_name.toLowerCase()}__${(p.default_unit||'kg').toLowerCase()}`, p.id) })
+              let priceRowsBefore = priceRows2.length
               toCreate2.forEach(item => {
                 const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
                 const pid = idLookup2.get(k)
                 if (pid) priceRows2.push({ supplier_id: supplierId, product_id: pid, price_php: item._price, stock_qty: item._stock, unit: item._unit, active: true, updated_at: new Date().toISOString() })
               })
+              dx.price_rows_added_from_new_products = priceRows2.length - priceRowsBefore
             }
           }
           let persistErr = null
+          dx.price_rows_before_collapse = priceRows2.length
           const dedupedPriceRows2 = collapsePriceRows(priceRows2)
+          dx.price_rows_after_collapse = dedupedPriceRows2.length
+          dx.price_rows_lost_in_collapse = priceRows2.length - dedupedPriceRows2.length
           if (dedupedPriceRows2.length && supplierId) {
             const { error: deleteErr } = await supabaseAdmin
               .from('supplier_prices')
@@ -665,17 +749,23 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             }
           }
           const matched2 = dedupedPriceRows2.length
+          dx.price_rows_saved = matched2
+          // Final summary: total drop from PDF input to saved rows. The user
+          // sees this number directly in the response and can pinpoint which
+          // step caused the loss.
+          dx.total_dropped_from_input = dx.product_lines_after_prefilter - matched2
+          console.log('[price-list upload] FINAL DIAGNOSTICS:', JSON.stringify(dx))
           if (persistErr) {
             if (uploadId) {
               await supabaseAdmin.from('price_list_uploads').update({
                 status: 'rejected',
-                ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length, error: persistErr })
+                ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length, error: persistErr, diagnostics: dx })
               }).eq('id', uploadId)
             }
-            return res.status(500).json({ error: persistErr, extracted: extracted.length, matched: matched2, created: toCreate2.length })
+            return res.status(500).json({ error: persistErr, extracted: extracted.length, matched: matched2, created: toCreate2.length, diagnostics: dx })
           }
-          if (uploadId) await supabaseAdmin.from('price_list_uploads').update({ status: 'needs_review', ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length }) }).eq('id', uploadId)
-          return res.status(201).json({ message: `Done! ${matched2} product${matched2!==1?'s':''} indexed (${toCreate2.length} new added to catalog).`, extracted: extracted.length, matched: matched2, created: toCreate2.length, anomalies: [] })
+          if (uploadId) await supabaseAdmin.from('price_list_uploads').update({ status: 'needs_review', ai_summary: JSON.stringify({ extracted: extracted.length, matched: matched2, created: toCreate2.length, diagnostics: dx }) }).eq('id', uploadId)
+          return res.status(201).json({ message: `Done! ${matched2} product${matched2!==1?'s':''} indexed (${toCreate2.length} new added to catalog).`, extracted: extracted.length, matched: matched2, created: toCreate2.length, anomalies: [], diagnostics: dx })
         }
         // Fallback: PDF had no recognisable price lines (unusual format).
         // Send first 6000 chars of raw text as a best-effort single call.
