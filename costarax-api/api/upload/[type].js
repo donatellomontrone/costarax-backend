@@ -528,16 +528,25 @@ Format: each line is one product. Lines may be prefixed with "SECTION > Sub-grou
 Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").
 IMPORTANT: Every input line MUST become one item in the output JSON array. Do not skip lines. If you can't parse a line, still emit it with whatever fields you can extract.`
 
-          // HARD concurrency cap — Anthropic's observed limit is ~9 concurrent
-          // connections on our tier. Two prior attempts proved the long-
-          // backoff retry strategy doesn't work (retries also got 429 even
-          // with 2-4 s wait). The only reliable way to stay under the limit
-          // is to never have more than 8 in flight.
+          // Two-phase parallel strategy:
           //
-          // Math: 16 chunks ÷ 8 workers = 2 chunks each × ~3 s = ~6 s wall.
-          // With one safety-net retry: ~9 s. Fits Vercel Hobby's 10 s ceiling.
-          const CHUNK_CONCURRENCY = 8
-
+          // Phase 1: fire all 16 chunks in parallel. The 9 that fit under
+          //   Anthropic's concurrent-connection ceiling succeed in ~5-6 s;
+          //   the other 7 fail with HTTP 429 IMMEDIATELY (<1 s). Wait for
+          //   ALL 16 promises to settle — by that point every slot is free.
+          //
+          // Phase 2: re-fire the failed chunks in parallel. Now there are
+          //   zero connections in flight, so 7 chunks fit comfortably under
+          //   the limit (~9). They all succeed in ~3 s.
+          //
+          // Total wall: ~5-6 s (phase 1) + ~3 s (phase 2) = ~8-9 s. Fits
+          // Vercel Hobby's 10 s timeout.
+          //
+          // Previous attempts that failed:
+          //   • Inline retry inside callChunk: backoff fires while phase-1
+          //     originals are still in flight → retry also gets 429.
+          //   • Worker pool concurrency 6 or 8: serialised wall time
+          //     (~10-15 s) exceeds the 10 s timeout.
           const callChunkOnce = async (chunk) => {
             return anthropicInner.messages.create({
               model,
@@ -549,67 +558,83 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           }
           const isRateLimit = (e) => e && (e.status === 429 || /rate.?limit|too many requests|concurrent connections/i.test(e.message || ''))
 
-          const callChunk = async (chunk, idx) => {
+          // Single attempt — wraps success or error into a uniform object so
+          // we can identify which chunks need a Phase 2 retry without
+          // letting the failed ones disappear into a .catch.
+          const tryChunk = async (chunk, idx, phase) => {
             const lineCount = chunk.split('\n').length
-            dx.chunk_input_lines_total += lineCount
-            let r = null
-            let lastErr = null
-            try { r = await callChunkOnce(chunk) }
-            catch (e) { lastErr = e }
-            const firstTryOk = !!r
-            // Safety-net retry on 429 (rare with concurrency cap of 8).
-            if (!r && isRateLimit(lastErr)) {
-              dx.retries_attempted += 1
-              const delay = 1500 + Math.floor(Math.random() * 1500) // 1.5-3.0 s
-              console.warn(`[price-list chunk ${idx}] RATE_LIMITED — retrying in ${delay}ms`)
-              await new Promise(res => setTimeout(res, delay))
-              try { r = await callChunkOnce(chunk); lastErr = null }
-              catch (e) { lastErr = e }
+            try {
+              const r = await callChunkOnce(chunk)
+              const text = r.content?.[0]?.text?.trim() || ''
+              const truncated = r.stop_reason === 'max_tokens'
+              console.log(`[chunk ${idx} phase${phase}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount}`)
+              return { idx, ok: true, text, lineCount, truncated }
+            } catch (e) {
+              const tag = e.status === 429 ? 'RATE_LIMITED' : (e.status ? `HTTP_${e.status}` : 'ERROR')
+              console.warn(`[chunk ${idx} phase${phase}] ${tag}: ${e.message?.slice(0, 100)}`)
+              return { idx, ok: false, error: e, lineCount, rateLimited: isRateLimit(e) }
             }
-            if (!r) {
-              const tag = lastErr?.status === 429 ? 'RATE_LIMITED' : (lastErr?.status ? `HTTP_${lastErr.status}` : 'ERROR')
-              console.error(`[price-list chunk ${idx}] ${tag} after retry:`, lastErr?.message)
-              dx.chunks_failed += 1
-              dx.failed_chunk_ids.push({ idx, error: lastErr?.message || 'unknown', status: lastErr?.status || null })
-              return { idx, text: '', lines_in: lineCount }
-            }
-            const text = r.content?.[0]?.text?.trim() || ''
-            const truncated = r.stop_reason === 'max_tokens'
-            console.log(`[price-list chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount}`)
-            if (truncated) {
-              console.warn(`[price-list chunk ${idx}] ⚠ OUTPUT TRUNCATED at max_tokens — items lost`)
-              dx.chunks_truncated += 1
-              dx.truncated_chunk_ids.push(idx)
-            }
-            dx.chunks_succeeded += 1
-            if (firstTryOk) dx.chunks_succeeded_on_first_try += 1
-            else dx.chunks_succeeded_on_retry += 1
-            return { idx, text, lines_in: lineCount }
           }
 
-          // Bounded-concurrency worker pool. N workers each pull the next
-          // unassigned chunk from a shared cursor. Single-threaded JS makes
-          // the cursor increment safe; cooperative await points let other
-          // workers run while one is in-flight.
-          const runBounded = async (items, concurrency, fn) => {
-            const out = new Array(items.length)
-            let cursor = 0
-            const worker = async () => {
-              while (true) {
-                const i = cursor++
-                if (i >= items.length) return
-                out[i] = await fn(items[i], i)
-              }
-            }
-            await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
-            return out
+          // Phase 1: all chunks in parallel. Wait for ALL to settle.
+          const phase1 = await Promise.all(chunks.map((chunk, idx) => tryChunk(chunk, idx, 1)))
+
+          // Track Phase 1 stats and the per-chunk line-count contribution
+          for (const r of phase1) {
+            dx.chunk_input_lines_total += r.lineCount
           }
-          const results = await runBounded(chunks, CHUNK_CONCURRENCY, callChunk)
+          const phase1Successes = phase1.filter(r => r.ok).length
+          const phase1RateLimited = phase1.filter(r => !r.ok && r.rateLimited)
+          const phase1OtherErrors = phase1.filter(r => !r.ok && !r.rateLimited)
+
+          // Phase 2: ONLY the rate-limited ones. Zero connections in flight
+          // because Phase 1's await Promise.all resolved (all originals
+          // either succeeded or errored). Re-fire them all in parallel.
+          let phase2 = []
+          if (phase1RateLimited.length > 0) {
+            console.log(`[upload] Phase 2: re-firing ${phase1RateLimited.length} chunks that got 429 in phase 1`)
+            dx.retries_attempted = phase1RateLimited.length
+            phase2 = await Promise.all(
+              phase1RateLimited.map(r => tryChunk(chunks[r.idx], r.idx, 2))
+            )
+          }
+
+          // Merge: start from phase1, override with phase2 successes by idx
+          const phase2ByIdx = new Map(phase2.map(r => [r.idx, r]))
+          const results = phase1.map(r => phase2ByIdx.get(r.idx) || r)
+
+          // Diagnostics roll-up
+          for (const r of results) {
+            if (r.ok) {
+              dx.chunks_succeeded += 1
+              if (r.truncated) {
+                dx.chunks_truncated += 1
+                dx.truncated_chunk_ids.push(r.idx)
+              }
+              // First-try vs retry attribution
+              const wasInPhase2 = phase2ByIdx.has(r.idx)
+              if (wasInPhase2) dx.chunks_succeeded_on_retry += 1
+              else dx.chunks_succeeded_on_first_try += 1
+            } else {
+              dx.chunks_failed += 1
+              dx.failed_chunk_ids.push({
+                idx: r.idx,
+                error: r.error?.message || 'unknown',
+                status: r.error?.status || null
+              })
+            }
+          }
+          // Normalise the result shape downstream code expects (idx/text only)
+          const downstreamResults = results.map(r => ({
+            idx: r.idx,
+            text: r.ok ? r.text : '',
+            lines_in: r.lineCount,
+          }))
 
           // Merge all chunk results — count items emitted per chunk so we know
           // which chunks under-produced (truncation, partial JSON parse, etc).
           const allItems = []
-          for (const { idx, text } of results) {
+          for (const { idx, text } of downstreamResults) {
             if (!text) continue
             const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || text.match(/(\[[\s\S]*)/)
             let raw = m ? (m[1] || m[0]).trim() : text.trim()
