@@ -361,25 +361,24 @@ async function handlePriceList(req, res) {
   // previous upload, which then get further dedup'd by collapsePriceRows.
   let useStrictMatching = false
   try {
+    // Compact 5-field schema: canonical, price, unit, category, stock.
+    // The downstream backend (inferStructuredProductMeta) already extracts
+    // producer / brand / cut_type / grade_spec / origin_series / form_factor /
+    // pack_weight from the canonical name with regex, so asking the AI to
+    // emit them is wasted output tokens (~260 vs ~80 per item = 3× the
+    // tokens per chunk = 3× the rate-limit cost on Tier 1's 10k tokens/min).
     const ruleBlock = `Extract products from this price list. Return JSON array only.
-Each item: {"name":"original","canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null,"producer":"REQUIRED if any brand/producer is mentioned","brand":"REQUIRED if any brand is mentioned","cut_type":"optional","grade_spec":"optional","origin_series":"optional","form_factor":"optional","pack_weight":"optional"}
-Rules: skip items without price. For price ranges use lower value. Expand abbreviations in canonical (e.g. mb2=Marble Grade 2, MS6-7=Marble Score 6-7).
-CRITICAL Canonical naming rules — read carefully:
-1. canonical MUST start with the brand/producer if one is mentioned (e.g. "Mayura", "Sanchoku", "Wagstaff", "Hardwick", "Pasture Fresh", "Signature Black Angus", "Augustus", "Diamantina", "Futari", "Seara", "Aurora", "Litera", "Cranswick"). Look at the rightmost column / end of each row — that's typically the brand.
-2. canonical MUST include the grade/marble score / series if present in section context (e.g. "Platinum Label MB9+", "Signature Series MB8-9+", "F1 Wagyu", "F4 Wagyu", "Angus", "Grain Fed", "Full Blood Wagyu") — these come from the line prefix "SECTION > Subgroup | ..."
-3. canonical MUST include distinguishing form factor (bone-in/boneless/halves/roll/center cut/Frenched/Chump On/Netted)
-4. canonical MUST include pack/weight band when present
-5. Two rows with the same cut but different brand/grade/series/weight MUST produce different canonicals. Never collapse them.
-Examples (correct):
-- "Mayura Platinum Label Tenderloin MB9+" vs "Mayura Signature Series Tenderloin MB8-9+" (same brand, different grade)
-- "Hardwick Australian Lamb Rack Frenched Bone In" vs "Wagstaff Australian Lamb Rack Frenched Bone In" (same cut, different brand)
-- "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7" vs "Sanchoku F1 Wagyu Tenderloin Marble Score 4-5"
-Examples (WRONG — never produce these):
-- "Tenderloin" (missing brand + grade)
-- "Lamb Rack Frenched" (missing brand)
-- "Mayura Tenderloin" when two grades exist (missing grade)
-stock rules: if the source row has a stock/qty/available/inventory column with a number, return that number. If the row explicitly says "out of stock" / "OOS" / "sold out", return 0. Otherwise return null (do not guess).
-Category rules: meat=beef/lamb/pork/chicken/poultry/foie gras, seafood=fish/shrimp/squid/scallop/oyster/crab, produce=vegetables/fruits/eggs/potato products, dry=rice/flour/oil/canned/spices/pasta/condiments, beverages=drinks/juice/water/coffee/milk, packaging=boxes/bags/containers.
+Each item: {"canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null}
+Rules: skip items without price. For price ranges use lower value. Expand abbreviations (mb2=Marble Grade 2, MS6-7=Marble Score 6-7).
+CRITICAL canonical naming:
+1. canonical MUST start with the brand/producer if mentioned (look at rightmost column / end of row).
+2. canonical MUST include grade/marble score / series from section context (Platinum Label MB9+, F1 Wagyu, Grain Fed).
+3. canonical MUST include distinguishing form factor (bone-in/boneless/Frenched/Chump On).
+4. canonical MUST include pack/weight band when present.
+5. Same cut + different brand/grade MUST get different canonicals. Never collapse.
+Examples: "Mayura Platinum Label Tenderloin MB9+" vs "Mayura Signature Series Tenderloin MB8-9+", "Hardwick Australian Lamb Rack Frenched Bone In" vs "Wagstaff Australian Lamb Rack Frenched Bone In".
+stock: if source has stock/qty column with number, return it. If "out of stock"/"OOS", return 0. Otherwise null.
+Category: meat=beef/lamb/pork/chicken/poultry, seafood=fish/shrimp/squid/crab/scallop, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices/pasta, beverages=drinks/juice/water/coffee, packaging=boxes/bags/containers.
 Supplier: ${supplierName}`
 
     // maxRetries: 0 disables the SDK's internal exponential-backoff retry on
@@ -561,16 +560,21 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           // returning network errors even on Pro — likely due to a subtle
           // bug in the merge / diagnostics roll-up. Worker pool is simpler
           // and easier to reason about.
-          // Concurrency 6: comfortably under Anthropic's observed ~9
-          // concurrent-connection ceiling so we never hit 429. With chunks
-          // of 25 lines (~5 s each) and 25 chunks total, wall time is
-          // 25 ÷ 6 ≈ 4.2 waves × 5 s ≈ 21 s. Pro 60 s budget fits easily.
-          const CHUNK_CONCURRENCY = 6
+          // Concurrency 3 = at most ~6k output tokens in flight at any
+          // moment (3 chunks × ~2k each with the compact 5-field schema),
+          // safely under Tier 1's 10k tokens/minute Anthropic rate limit.
+          // This is the real bottleneck — not concurrent-connections, but
+          // output-tokens-per-minute. Concurrency 6 would emit ~12k/min
+          // and trigger 429s on chunks 7+.
+          const CHUNK_CONCURRENCY = 3
           console.log(`[upload] Pipeline: ${chunks.length} chunks, concurrency=${CHUNK_CONCURRENCY}`)
 
           const callChunkOnce = async (chunk) => anthropicInner.messages.create({
             model,
-            max_tokens: 8000,
+            // 25 items × ~80 tokens with the compact 5-field schema = ~2k
+            // tokens; 3k gives comfortable headroom for slightly larger
+            // canonical names without truncation.
+            max_tokens: 3000,
             temperature: 0,
             system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
             messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
@@ -913,7 +917,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           const anthropicInner2 = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 })
           const chunkResults2 = await Promise.all(textChunks.map((chunk, idx) =>
             anthropicInner2.messages.create({
-              model, max_tokens: 6000, temperature: 0,
+              model, max_tokens: 3000, temperature: 0,
               system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
               messages: [{ role: 'user', content: `${ruleBlock}\n---\n${chunk}\n---\nJSON:` }]
             }).then(r => {
@@ -966,7 +970,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     if (!extracted.length && userContent !== undefined) {
     const aiMsg = await anthropic.messages.create({
       model,
-      max_tokens: 4000,
+      max_tokens: 2000,
       temperature: 0,
       system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array.',
       messages: [{ role: 'user', content: userContent }]
