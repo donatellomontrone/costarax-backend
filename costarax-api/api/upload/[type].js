@@ -436,12 +436,136 @@ async function handlePriceList(req, res) {
         upload_id: uploadId
       })
     }
+
+    // ── Enrich preview items so the frontend can show price deltas vs the
+    // supplier's last upload, market-position badges (cheaper / pricier
+    // than the market median), and amber warning highlights for rows that
+    // look suspicious (price > 3× market median, unit not in the standard
+    // list, big swing vs previous price, etc.).
+    //
+    // Strategy:
+    //   1) Resolve each preview item's canonical+unit to a product_id by
+    //      looking it up in the catalog (exact match only — same logic
+    //      the save path uses).
+    //   2) Pull the supplier's CURRENT supplier_prices for those product
+    //      ids → previous_price.
+    //   3) Pull OTHER suppliers' active prices for the same product ids
+    //      → market_median.
+    //   4) Compute flags and attach to each item.
+    //
+    // All four queries are single round-trips with .in() filters, so the
+    // total preview cost stays well under 1 second even at 600 items.
+    let enrichedItems = tmplItems
+    try {
+      const STANDARD_UNITS = new Set([
+        'kg','g','lb','oz','pc','pcs','piece','box','case','sack','bag',
+        'bottle','can','l','liter','litre','ml','tray','pack','carton',
+        'cup','dozen','set','jar','tube','roll'
+      ])
+      const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+      const median = (arr) => {
+        if (!arr.length) return null
+        const s = [...arr].sort((a, b) => a - b)
+        const mid = Math.floor(s.length / 2)
+        return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+      }
+
+      // 1) Catalog lookup. Build a key map of canonical+unit -> product_id
+      //    by pulling the full active catalog (capped at 5000 — covers any
+      //    realistic supplier list including the Hightower 600-row case).
+      const { data: catalog } = await supabaseAdmin
+        .from('products').select('id, canonical_name, default_unit').eq('active', true).limit(5000)
+      const productByKey = new Map()
+      ;(catalog || []).forEach(p => {
+        const k = `${norm(p.canonical_name)}__${(p.default_unit || '').toLowerCase().trim()}`
+        productByKey.set(k, p.id)
+      })
+      const previewKey = (it) => `${norm(it.canonical || it.name || '')}__${(it.unit || '').toLowerCase().trim()}`
+      const matchedIds = new Set()
+      const itemToPid = new Map()
+      tmplItems.forEach((it, idx) => {
+        const k = previewKey(it)
+        const pid = productByKey.get(k)
+        if (pid) { matchedIds.add(pid); itemToPid.set(idx, pid) }
+      })
+
+      // 2) Previous supplier prices
+      const prevByPid = {}
+      if (supplierId && matchedIds.size > 0) {
+        const { data: prev } = await supabaseAdmin
+          .from('supplier_prices')
+          .select('product_id, price_php, unit')
+          .eq('supplier_id', supplierId)
+          .in('product_id', [...matchedIds])
+        ;(prev || []).forEach(p => {
+          prevByPid[`${p.product_id}__${(p.unit || '').toLowerCase().trim()}`] = Number(p.price_php)
+        })
+      }
+
+      // 3) Market (other suppliers') prices for the same product ids
+      const marketByPid = {}
+      if (matchedIds.size > 0) {
+        const { data: mkt } = await supabaseAdmin
+          .from('supplier_prices')
+          .select('product_id, price_php, unit, supplier_id')
+          .in('product_id', [...matchedIds])
+          .eq('active', true)
+        ;(mkt || []).forEach(m => {
+          if (supplierId && m.supplier_id === supplierId) return
+          const k = `${m.product_id}__${(m.unit || '').toLowerCase().trim()}`
+          if (!marketByPid[k]) marketByPid[k] = []
+          marketByPid[k].push(Number(m.price_php))
+        })
+      }
+
+      // 4) Build the enriched item
+      enrichedItems = tmplItems.map((it, idx) => {
+        const pid = itemToPid.get(idx) || null
+        const unitKey = (it.unit || '').toLowerCase().trim()
+        const prevPrice = pid ? (prevByPid[`${pid}__${unitKey}`] || null) : null
+        const marketArr = pid ? (marketByPid[`${pid}__${unitKey}`] || []) : []
+        const marketMed = marketArr.length ? median(marketArr) : null
+        const price = Number(it.price) || 0
+
+        const flags = []
+        if (marketMed && marketMed > 0) {
+          const ratio = price / marketMed
+          if (ratio > 3) flags.push({ key: 'above_market', label: `Price is ${Math.round(ratio)}× the market median (₱${Math.round(marketMed)})` })
+          else if (ratio < 0.33) flags.push({ key: 'below_market', label: `Price is ${Math.round(1 / ratio)}× cheaper than the market median (₱${Math.round(marketMed)}) — typo?` })
+        }
+        if (prevPrice && prevPrice > 0) {
+          const change = (price - prevPrice) / prevPrice
+          if (change >= 0.5)  flags.push({ key: 'big_increase', label: `Up ${Math.round(change * 100)}% from your previous price ₱${Math.round(prevPrice)}` })
+          if (change <= -0.5) flags.push({ key: 'big_drop',     label: `Down ${Math.round(Math.abs(change) * 100)}% from your previous price ₱${Math.round(prevPrice)}` })
+        }
+        if (it.unit && !STANDARD_UNITS.has(unitKey)) {
+          flags.push({ key: 'unusual_unit', label: `Unit "${it.unit}" is unusual — buyers may not understand it` })
+        }
+        if (!pid) {
+          flags.push({ key: 'new_product', label: 'No matching catalog entry — a new product will be created on save' })
+        }
+
+        return {
+          ...it,
+          previous_price: prevPrice,
+          market_median: marketMed,
+          market_supplier_count: marketArr.length,
+          flags,
+          matched_product_id: pid
+        }
+      })
+    } catch (enrichErr) {
+      console.warn('[upload preview] enrichment failed (non-fatal):', enrichErr.message)
+      // Fall back to plain items if enrichment errors — the preview UI still works.
+      enrichedItems = tmplItems
+    }
+
     return res.status(200).json({
       preview: true,
-      items: tmplItems,
-      count: tmplItems.length,
+      items: enrichedItems,
+      count: enrichedItems.length,
       upload_id: uploadId,
-      message: `Parsed ${tmplItems.length} products. Review and confirm to save.`
+      message: `Parsed ${enrichedItems.length} products. Review and confirm to save.`
     })
   }
   try {
