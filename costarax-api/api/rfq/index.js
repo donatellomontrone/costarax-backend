@@ -139,10 +139,12 @@ async function sendNotifications(inserted, validSuppliers, products_summary, mes
   const supMap = Object.fromEntries(validSuppliers.map(s => [s.id, s.name]))
   await Promise.allSettled((inserted || []).map(async (q) => {
     try {
+      // Suppliers can have 0 or 2+ linked users — .single() throws then.
+      // Notify the first linked user (limit 1) and silently no-op if zero.
       const { data: supplierMember } = await supabaseAdmin.from('organization_members')
-        .select('user_id').eq('supplier_id', q.supplier_id).single()
+        .select('user_id').eq('supplier_id', q.supplier_id).limit(1).maybeSingle()
       if (supplierMember?.user_id) {
-        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).single()
+        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).maybeSingle()
         if (sp?.email) {
           const tpl = quoteReceivedEmail({
             supplierName: supMap[q.supplier_id],
@@ -164,9 +166,9 @@ async function sendNotificationsBasket(inserted, validSuppliers, itemsBySupplier
     try {
       const bucket = itemsBySupplier[q.supplier_id] || {}
       const { data: supplierMember } = await supabaseAdmin.from('organization_members')
-        .select('user_id').eq('supplier_id', q.supplier_id).single()
+        .select('user_id').eq('supplier_id', q.supplier_id).limit(1).maybeSingle()
       if (supplierMember?.user_id) {
-        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).single()
+        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).maybeSingle()
         if (sp?.email) {
           const tpl = quoteReceivedEmail({
             supplierName: supMap[q.supplier_id],

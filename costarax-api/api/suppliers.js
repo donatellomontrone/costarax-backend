@@ -395,7 +395,7 @@ module.exports = async (req, res) => {
 
       if (insErr) return res.status(500).json({ error: insErr.message })
 
-      const adminEmail = process.env.ADMIN_EMAIL || 'donatello@costarax.com'
+      const adminEmail = process.env.ADMIN_EMAIL || 'hello@costarax.com'
       sendEmail({ to: adminEmail, subject: `New supplier registration: ${name.trim()}`,
         html: `<p>New supplier pending approval: <strong>${name.trim()}</strong> (${category}) — ${contact_email}</p><p>Approve at <a href="https://costarax.com/app.html">costarax.com</a> → Admin → Manage Suppliers.</p>` }).catch(() => {})
       sendEmail({ to: contact_email.trim().toLowerCase(), subject: 'Your Costarax supplier application has been received',
