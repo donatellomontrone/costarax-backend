@@ -9,17 +9,43 @@ module.exports = async (req, res) => {
 
   const { id, action } = req.query
 
-  const { data: request, error: reqErr } = await supabaseAdmin
-    .from('access_requests').select('*').eq('id', id).single()
+  // Atomic claim — flip status pending -> processing in a single query so a
+  // double-click can't bypass the "already processed" check via race
+  // condition. Postgres' atomicity guarantees only ONE of the concurrent
+  // requests gets a row back; the other gets an empty result and bails out
+  // with 409. Previously the read + write were two separate trips, so a
+  // fast double-click could create two suppliers from the same request.
+  const { data: claimedRows, error: claimErr } = await supabaseAdmin
+    .from('access_requests')
+    .update({ status: 'processing' })
+    .eq('id', id)
+    .eq('status', 'pending')
+    .select('*')
 
-  if (reqErr || !request) return res.status(404).json({ error: 'Access request not found' })
-  if (request.status !== 'pending') return res.status(400).json({ error: 'Already processed' })
+  if (claimErr) return res.status(500).json({ error: `Could not claim request: ${claimErr.message}` })
+  if (!claimedRows || claimedRows.length === 0) {
+    // Either id doesn't exist OR another request already claimed it.
+    const { data: existing } = await supabaseAdmin
+      .from('access_requests').select('status').eq('id', id).maybeSingle()
+    if (!existing) return res.status(404).json({ error: 'Access request not found' })
+    return res.status(409).json({ error: `Already ${existing.status}` })
+  }
+  const request = claimedRows[0]
+
+  // Helper to revert the claim back to 'pending' if downstream creation
+  // fails — without this, a failed approve leaves the row stuck in
+  // 'processing' state and the admin can't retry.
+  const revertClaim = async () => {
+    await supabaseAdmin.from('access_requests')
+      .update({ status: 'pending' }).eq('id', id).eq('status', 'processing')
+      .catch(() => {})
+  }
 
   // ── REJECT ────────────────────────────────────────────────────────────────
   if (action === 'reject') {
     const { error } = await supabaseAdmin
       .from('access_requests').update({ status: 'rejected' }).eq('id', id)
-    if (error) return res.status(500).json({ error: error.message })
+    if (error) { await revertClaim(); return res.status(500).json({ error: error.message }) }
 
     await supabaseAdmin.from('admin_actions').insert({
       admin_id: auth.user.id, action_type: 'reject_access_request',
@@ -50,7 +76,7 @@ module.exports = async (req, res) => {
         status: 'approved', rating: 5.0, review_count: 0
       }).select('id').single()
 
-      if (supErr) return res.status(500).json({ error: `Supplier creation failed: ${supErr.message}` })
+      if (supErr) { await revertClaim(); return res.status(500).json({ error: `Supplier creation failed: ${supErr.message}` }) }
 
       const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
         request.contact_email, {
@@ -60,6 +86,9 @@ module.exports = async (req, res) => {
       )
       if (inviteErr) {
         console.error('Invite failed for supplier:', request.contact_email, inviteErr.message)
+        // Roll back the supplier we just created so a retry doesn't dup it
+        await supabaseAdmin.from('suppliers').delete().eq('id', supplier.id).catch(() => {})
+        await revertClaim()
         return res.status(500).json({ error: `Invite failed: ${inviteErr.message}. Please retry or check the email address.` })
       }
       const userId = invite?.user?.id
@@ -101,7 +130,7 @@ module.exports = async (req, res) => {
         status: 'approved', approved_at: new Date().toISOString()
       }).select('id').single()
 
-      if (bizErr) return res.status(500).json({ error: `Business creation failed: ${bizErr.message}` })
+      if (bizErr) { await revertClaim(); return res.status(500).json({ error: `Business creation failed: ${bizErr.message}` }) }
 
       const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
         request.contact_email, {
@@ -111,6 +140,8 @@ module.exports = async (req, res) => {
       )
       if (inviteErr) {
         console.error('Invite failed for buyer:', request.contact_email, inviteErr.message)
+        await supabaseAdmin.from('businesses').delete().eq('id', biz.id).catch(() => {})
+        await revertClaim()
         return res.status(500).json({ error: `Invite failed: ${inviteErr.message}. Please retry or check the email address.` })
       }
       const userId = invite?.user?.id
