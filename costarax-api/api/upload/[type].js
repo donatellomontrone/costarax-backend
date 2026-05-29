@@ -816,13 +816,18 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           dx.price_rows_after_collapse = dedupedPriceRows2.length
           dx.price_rows_lost_in_collapse = priceRows2.length - dedupedPriceRows2.length
           if (dedupedPriceRows2.length && supplierId) {
+            // Full-replace semantics: every upload wipes the supplier's
+            // current price list before inserting the new one. Previously
+            // we only deleted prices for product_ids in the new payload,
+            // which left orphan rows from earlier uploads — the supplier's
+            // catalog grew with every retry instead of being replaced.
             const { error: deleteErr } = await supabaseAdmin
               .from('supplier_prices')
               .delete()
               .eq('supplier_id', supplierId)
-              .in('product_id', dedupedPriceRows2.map(r => r.product_id))
+            dx.full_replace_delete_error = deleteErr?.message || null
             if (deleteErr) {
-              persistErr = 'Could not replace existing supplier prices: ' + deleteErr.message
+              persistErr = 'Could not clear existing supplier prices: ' + deleteErr.message
             } else {
               const { error: insertErr2 } = await supabaseAdmin
                 .from('supplier_prices')
@@ -1199,14 +1204,14 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
 
   const dedupedPriceRows = collapsePriceRows(priceRows)
   if (dedupedPriceRows.length && supplierId) {
-    const productIds = dedupedPriceRows.map(r => r.product_id)
+    // Full-replace: wipe the supplier's existing price list before insert
+    // so orphan rows from previous uploads don't accumulate.
     const { error: deleteErr } = await supabaseAdmin
       .from('supplier_prices')
       .delete()
       .eq('supplier_id', supplierId)
-      .in('product_id', productIds)
     if (deleteErr) {
-      upsertError = 'Could not replace existing supplier prices: ' + deleteErr.message
+      upsertError = 'Could not clear existing supplier prices: ' + deleteErr.message
     } else {
       const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(dedupedPriceRows)
       upsertError = uErr ? ('Could not save supplier prices: ' + uErr.message) : null
