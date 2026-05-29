@@ -486,18 +486,17 @@ Supplier: ${supplierName}`
         console.log('[price-list upload] pre-extracted', productLines.length, 'product lines (PDF was', pdfText.length, 'chars)')
 
         // ── Diagnostics container ───────────────────────────────────────────
-        // Tracks every step of the pipeline so the response tells us EXACTLY
-        // where products disappear (PDF → AI → dedup → matching → DB). Without
-        // this we were tuning blind: 581 in the PDF, 328 saved, 250 lost
-        // somewhere across 7 possible drop points.
         const dx = {
           pdf_text_chars: pdfText.length,
           pdf_raw_lines: rawLines.length,
           product_lines_after_prefilter: productLines.length,
           chunks_total: 0,
           chunks_succeeded: 0,
+          chunks_succeeded_on_first_try: 0,
+          chunks_succeeded_on_retry: 0,
           chunks_failed: 0,
           chunks_truncated: 0,
+          retries_attempted: 0,
           failed_chunk_ids: [],
           truncated_chunk_ids: [],
           chunk_input_lines_total: 0,
@@ -529,19 +528,16 @@ Format: each line is one product. Lines may be prefixed with "SECTION > Sub-grou
 Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").
 IMPORTANT: Every input line MUST become one item in the output JSON array. Do not skip lines. If you can't parse a line, still emit it with whatever fields you can extract.`
 
-          // Strategy: fire all chunks in parallel for fast wall time (~3-5 s),
-          // accept that ~7 will get 429 on Anthropic's concurrent-connection
-          // limit (~9 on our tier), then retry those AFTER a long backoff
-          // (2-4 s) so the original 9 have finished and freed their slots.
+          // HARD concurrency cap — Anthropic's observed limit is ~9 concurrent
+          // connections on our tier. Two prior attempts proved the long-
+          // backoff retry strategy doesn't work (retries also got 429 even
+          // with 2-4 s wait). The only reliable way to stay under the limit
+          // is to never have more than 8 in flight.
           //
-          // Why this beats the alternatives:
-          //   • Parallel-16 + short retry (600-1000ms): retries fire while
-          //     originals still occupy slots → retries also fail.
-          //   • Bounded concurrency 6: serialises chunks → ~7-9 s wall +
-          //     retry = ~10-12 s, hits Vercel Hobby's 10 s timeout.
-          //   • Parallel-16 + long retry: originals finish at ~3 s, retries
-          //     fire at ~5-7 s when zero are in flight → all succeed →
-          //     total ~8-10 s. Fits.
+          // Math: 16 chunks ÷ 8 workers = 2 chunks each × ~3 s = ~6 s wall.
+          // With one safety-net retry: ~9 s. Fits Vercel Hobby's 10 s ceiling.
+          const CHUNK_CONCURRENCY = 8
+
           const callChunkOnce = async (chunk) => {
             return anthropicInner.messages.create({
               model,
@@ -560,12 +556,11 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             let lastErr = null
             try { r = await callChunkOnce(chunk) }
             catch (e) { lastErr = e }
-            // Long jittered backoff so retries fire AFTER the original wave
-            // of 9 successful chunks has drained Anthropic's concurrent-
-            // connection slots. The wide jitter (2-4 s) also spreads the
-            // retries themselves so they don't pile up at the same instant.
+            const firstTryOk = !!r
+            // Safety-net retry on 429 (rare with concurrency cap of 8).
             if (!r && isRateLimit(lastErr)) {
-              const delay = 2000 + Math.floor(Math.random() * 2000) // 2.0-4.0 s
+              dx.retries_attempted += 1
+              const delay = 1500 + Math.floor(Math.random() * 1500) // 1.5-3.0 s
               console.warn(`[price-list chunk ${idx}] RATE_LIMITED — retrying in ${delay}ms`)
               await new Promise(res => setTimeout(res, delay))
               try { r = await callChunkOnce(chunk); lastErr = null }
@@ -587,9 +582,29 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
               dx.truncated_chunk_ids.push(idx)
             }
             dx.chunks_succeeded += 1
+            if (firstTryOk) dx.chunks_succeeded_on_first_try += 1
+            else dx.chunks_succeeded_on_retry += 1
             return { idx, text, lines_in: lineCount }
           }
-          const results = await Promise.all(chunks.map((chunk, idx) => callChunk(chunk, idx)))
+
+          // Bounded-concurrency worker pool. N workers each pull the next
+          // unassigned chunk from a shared cursor. Single-threaded JS makes
+          // the cursor increment safe; cooperative await points let other
+          // workers run while one is in-flight.
+          const runBounded = async (items, concurrency, fn) => {
+            const out = new Array(items.length)
+            let cursor = 0
+            const worker = async () => {
+              while (true) {
+                const i = cursor++
+                if (i >= items.length) return
+                out[i] = await fn(items[i], i)
+              }
+            }
+            await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
+            return out
+          }
+          const results = await runBounded(chunks, CHUNK_CONCURRENCY, callChunk)
 
           // Merge all chunk results — count items emitted per chunk so we know
           // which chunks under-produced (truncation, partial JSON parse, etc).
