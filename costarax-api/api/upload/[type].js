@@ -529,19 +529,19 @@ Format: each line is one product. Lines may be prefixed with "SECTION > Sub-grou
 Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").
 IMPORTANT: Every input line MUST become one item in the output JSON array. Do not skip lines. If you can't parse a line, still emit it with whatever fields you can extract.`
 
-          // Anthropic enforces a HARD limit on concurrent connections per
-          // account (observed ~9 on our tier). Firing 16 chunks in parallel
-          // got 7 back as HTTP 429 "Number of concurrent connections has
-          // exceeded your rate limit" — and even a single retry-with-backoff
-          // didn't help because all 7 backed off in unison and slammed the
-          // limit again on retry.
+          // Strategy: fire all chunks in parallel for fast wall time (~3-5 s),
+          // accept that ~7 will get 429 on Anthropic's concurrent-connection
+          // limit (~9 on our tier), then retry those AFTER a long backoff
+          // (2-4 s) so the original 9 have finished and freed their slots.
           //
-          // Real fix: bounded concurrency pool. We never have more than
-          // CHUNK_CONCURRENCY chunks in flight at once. Math:
-          //   16 chunks ÷ 6 concurrent ≈ 3 logical waves × ~2.5 s = ~7.5 s
-          // Safely under Vercel's 10 s function timeout. The single retry
-          // stays as a safety net for transient 429s but should rarely fire.
-          const CHUNK_CONCURRENCY = 6
+          // Why this beats the alternatives:
+          //   • Parallel-16 + short retry (600-1000ms): retries fire while
+          //     originals still occupy slots → retries also fail.
+          //   • Bounded concurrency 6: serialises chunks → ~7-9 s wall +
+          //     retry = ~10-12 s, hits Vercel Hobby's 10 s timeout.
+          //   • Parallel-16 + long retry: originals finish at ~3 s, retries
+          //     fire at ~5-7 s when zero are in flight → all succeed →
+          //     total ~8-10 s. Fits.
           const callChunkOnce = async (chunk) => {
             return anthropicInner.messages.create({
               model,
@@ -560,10 +560,12 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             let lastErr = null
             try { r = await callChunkOnce(chunk) }
             catch (e) { lastErr = e }
-            // Retry once on rate-limit (longer jittered backoff so retries
-            // don't pile back up at the same instant).
+            // Long jittered backoff so retries fire AFTER the original wave
+            // of 9 successful chunks has drained Anthropic's concurrent-
+            // connection slots. The wide jitter (2-4 s) also spreads the
+            // retries themselves so they don't pile up at the same instant.
             if (!r && isRateLimit(lastErr)) {
-              const delay = 1500 + Math.floor(Math.random() * 1500) // 1.5-3.0 s
+              const delay = 2000 + Math.floor(Math.random() * 2000) // 2.0-4.0 s
               console.warn(`[price-list chunk ${idx}] RATE_LIMITED — retrying in ${delay}ms`)
               await new Promise(res => setTimeout(res, delay))
               try { r = await callChunkOnce(chunk); lastErr = null }
@@ -587,26 +589,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             dx.chunks_succeeded += 1
             return { idx, text, lines_in: lineCount }
           }
-
-          // Bounded-concurrency runner. N workers pull from a shared cursor;
-          // each worker calls callChunk sequentially, never exceeding N in
-          // flight at any moment. Single-threaded JS makes the cursor
-          // increment safe; the cooperative await points let other workers
-          // grab the next task.
-          const runBounded = async (items, concurrency, fn) => {
-            const out = new Array(items.length)
-            let cursor = 0
-            const worker = async () => {
-              while (true) {
-                const i = cursor++
-                if (i >= items.length) return
-                out[i] = await fn(items[i], i)
-              }
-            }
-            await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
-            return out
-          }
-          const results = await runBounded(chunks, CHUNK_CONCURRENCY, callChunk)
+          const results = await Promise.all(chunks.map((chunk, idx) => callChunk(chunk, idx)))
 
           // Merge all chunk results — count items emitted per chunk so we know
           // which chunks under-produced (truncation, partial JSON parse, etc).
