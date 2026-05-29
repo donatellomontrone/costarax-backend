@@ -9,15 +9,29 @@ module.exports = async (req, res) => {
 
   const { id, action } = req.query
 
-  // Atomic claim — flip status pending -> processing in a single query so a
-  // double-click can't bypass the "already processed" check via race
-  // condition. Postgres' atomicity guarantees only ONE of the concurrent
-  // requests gets a row back; the other gets an empty result and bails out
-  // with 409. Previously the read + write were two separate trips, so a
-  // fast double-click could create two suppliers from the same request.
+  // Atomic claim — race-safe against double-click without needing a new
+  // enum value. The access_requests.status column has a restrictive enum
+  // (pending / approved / rejected) so we can't park it in an
+  // intermediate 'processing' state. Instead we claim by jumping directly
+  // to the FINAL status (approved or rejected) using a conditional UPDATE
+  // that only succeeds if status is still 'pending'. Postgres guarantees
+  // exactly ONE concurrent request wins this update — the other gets
+  // zero rows back and exits with 409 'Already processed'.
+  //
+  // If the downstream work (supplier creation, invite email) then fails,
+  // we revert the row back to 'pending' so the admin can retry. The
+  // (tiny) failure window is: row flipped to approved, but reverting it
+  // back also fails. In that case the admin would see an approved
+  // access_request without a supplier — a known oddity worth a manual
+  // cleanup, but no data corruption and no duplicates.
+  const targetStatus = action === 'reject' ? 'rejected' : 'approved'
   const { data: claimedRows, error: claimErr } = await supabaseAdmin
     .from('access_requests')
-    .update({ status: 'processing' })
+    .update({
+      status: targetStatus,
+      reviewed_at: new Date().toISOString(),
+      reviewed_by: auth.user.id
+    })
     .eq('id', id)
     .eq('status', 'pending')
     .select('*')
@@ -33,25 +47,23 @@ module.exports = async (req, res) => {
   const request = claimedRows[0]
 
   // Helper to revert the claim back to 'pending' if downstream creation
-  // fails — without this, a failed approve leaves the row stuck in
-  // 'processing' state and the admin can't retry.
+  // fails — without this, a partially-failed approve leaves the row
+  // stuck in 'approved' state without a supplier/business and the admin
+  // can't retry.
   const revertClaim = async () => {
     await supabaseAdmin.from('access_requests')
-      .update({ status: 'pending' }).eq('id', id).eq('status', 'processing')
+      .update({ status: 'pending', reviewed_at: null, reviewed_by: null })
+      .eq('id', id).eq('status', targetStatus)
       .catch(() => {})
   }
 
   // ── REJECT ────────────────────────────────────────────────────────────────
   if (action === 'reject') {
-    const { error } = await supabaseAdmin
-      .from('access_requests').update({ status: 'rejected' }).eq('id', id)
-    if (error) { await revertClaim(); return res.status(500).json({ error: error.message }) }
-
+    // Status already set to 'rejected' by the atomic claim above.
     await supabaseAdmin.from('admin_actions').insert({
       admin_id: auth.user.id, action_type: 'reject_access_request',
       target_id: id, notes: `Rejected: ${request.company_name}`
     })
-
     return res.status(200).json({ message: `${request.company_name} rejected` })
   }
 
@@ -102,10 +114,9 @@ module.exports = async (req, res) => {
         })
       }
 
-      await supabaseAdmin.from('access_requests').update({
-        status: 'approved', reviewed_at: new Date().toISOString(), reviewed_by: auth.user.id
-      }).eq('id', id)
-
+      // Note: access_requests.status was already set to 'approved' (with
+      // reviewed_at + reviewed_by) by the atomic claim at the top of this
+      // handler. No need to update it again here.
       await supabaseAdmin.from('admin_actions').insert({
         admin_id: auth.user.id, action_type: 'approve_supplier_request',
         target_id: supplier.id,
@@ -155,10 +166,7 @@ module.exports = async (req, res) => {
         })
       }
 
-      await supabaseAdmin.from('access_requests').update({
-        status: 'approved', reviewed_at: new Date().toISOString(), reviewed_by: auth.user.id
-      }).eq('id', id)
-
+      // Already set to 'approved' by the atomic claim above.
       await supabaseAdmin.from('admin_actions').insert({
         admin_id: auth.user.id, action_type: 'approve_buyer_request',
         target_id: biz.id, notes: `Approved buyer: ${request.company_name}`
