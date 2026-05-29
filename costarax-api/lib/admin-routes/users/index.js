@@ -299,13 +299,13 @@ module.exports = async (req, res) => {
         const { data: linkData } = await supabaseAdmin.auth.admin.generateLink({
           type: 'recovery',
           email: email.trim().toLowerCase(),
-          options: { redirectTo: 'https://costarax.com/app.html' },
+          options: { redirectTo: 'https://costarax.com/login.html' },
         })
         resetLink = linkData?.properties?.action_link || linkData?.action_link || null
         if (resetLink) {
           try {
             const u = new URL(resetLink)
-            u.searchParams.set('redirect_to', 'https://costarax.com/app.html')
+            u.searchParams.set('redirect_to', 'https://costarax.com/login.html')
             resetLink = u.toString()
           } catch {}
         }
@@ -344,7 +344,7 @@ module.exports = async (req, res) => {
     const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
       type: 'recovery',
       email: targetEmail,
-      options: { redirectTo: 'https://costarax.com/app.html' },
+      options: { redirectTo: 'https://costarax.com/login.html' },
     })
     if (linkErr) return res.status(500).json({ error: linkErr.message })
 
@@ -354,7 +354,7 @@ module.exports = async (req, res) => {
     // Force redirect_to to costarax.com — Supabase falls back to Site URL (localhost) otherwise
     try {
       const u = new URL(resetLink)
-      u.searchParams.set('redirect_to', 'https://costarax.com/app.html')
+      u.searchParams.set('redirect_to', 'https://costarax.com/login.html')
       resetLink = u.toString()
     } catch (e) { /* leave as-is */ }
 

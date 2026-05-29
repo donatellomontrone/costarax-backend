@@ -30,7 +30,7 @@ module.exports = async (req, res) => {
 
     if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
       const { data: biz } = await supabaseAdmin
-        .from('businesses').select('id').eq('contact_email', auth.user.email).single()
+        .from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
 
       if (!biz) {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
@@ -81,7 +81,7 @@ module.exports = async (req, res) => {
     let buyerName = null
 
     const { data: biz } = await supabaseAdmin
-      .from('businesses').select('id,name').eq('contact_email', auth.user.email).single()
+      .from('businesses').select('id,name').eq('contact_email', auth.user.email).maybeSingle()
 
     if (biz) {
       buyerBusinessId = biz.id

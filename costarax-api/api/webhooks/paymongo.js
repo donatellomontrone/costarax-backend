@@ -94,7 +94,7 @@ module.exports = async (req, res) => {
           html: `<div style="font-family:sans-serif;padding:24px;max-width:500px">
             <h2 style="color:#1A5C3A">Payment confirmed ✓</h2>
             <p>Your Costarax supplier profile is now active and visible to verified buyers.</p>
-            <a href="https://costarax.vercel.app/app.html?role=supplier" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">Go to dashboard</a>
+            <a href="https://costarax.com/app.html?role=supplier" style="display:inline-block;margin-top:16px;background:#1A5C3A;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:700;">Go to dashboard</a>
           </div>`
         })
       }

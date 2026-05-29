@@ -1,6 +1,10 @@
 const nodemailer = require('nodemailer')
 
-const FROM = process.env.EMAIL_FROM || 'Costarax <onboarding@resend.dev>'
+// Default to the production Costarax address. The previous fallback
+// (onboarding@resend.dev) was Resend's sandbox sender, which gets flagged
+// as spoofing by some inboxes and looks unprofessional. EMAIL_FROM env
+// var still wins when set.
+const FROM = process.env.EMAIL_FROM || 'Costarax <hello@costarax.com>'
 const EMAIL_TIMEOUT_MS = parseInt(process.env.EMAIL_TIMEOUT_MS || '8000', 10)
 
 function withTimeout(promise, ms, label) {
@@ -51,7 +55,10 @@ async function sendEmail({ to, subject, html }) {
   return { ok: true }
 }
 
-const APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.vercel.app'
+// Default to the production marketing domain, not the Vercel deploy URL.
+// All transactional email CTAs route through APP_URL — keeping this on
+// costarax.com avoids confusing users with a costarax.vercel.app link.
+const APP_URL = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://costarax.com'
 
 // ── Shared layout ─────────────────────────────────────────────────────────────
 function layout(title, bodyHtml) {

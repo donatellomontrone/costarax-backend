@@ -22,7 +22,7 @@ module.exports = async (req, res) => {
     if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
       let buyerBusinessId = null
       const { data: biz } = await supabaseAdmin
-        .from('businesses').select('id').eq('contact_email', auth.user.email).single()
+        .from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
         buyerBusinessId = org?.business_id || null
