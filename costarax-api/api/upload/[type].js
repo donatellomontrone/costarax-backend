@@ -257,6 +257,15 @@ function parseCostaraxTemplate(text, supplierName) {
 
 // ── 1) price-list (text → AI extract → DB upsert) ─────────────────────────
 async function handlePriceList(req, res) {
+  // Wall-time tracker so the function can return a partial response BEFORE
+  // Vercel's gateway times out (which strips CORS headers and surfaces to
+  // the browser as a confusing 504/CORS error). Whichever plan we're on,
+  // capping ourselves at 50 s leaves headroom under both Hobby's 10 s
+  // (effectively bypassed by skipping the cap then) and Pro's 60 s.
+  const REQUEST_STARTED_AT = Date.now()
+  const wallElapsed = () => Date.now() - REQUEST_STARTED_AT
+  console.log('[upload] handlePriceList: start')
+
   const auth = await requireAuth(req, res)
   if (!auth) return
   if (!['supplier', 'admin'].includes(auth.profile.role)) {
@@ -388,6 +397,7 @@ Supplier: ${supplierName}`
         return res.status(415).json({ error: `Unsupported file type "${file_mime}". Use PDF or image (jpg, png, webp).` })
       }
 
+      console.log(`[upload] t=${wallElapsed()}ms file received: ${isPdf?'PDF':'image'}, ${file_b64.length} bytes b64`)
       if (isPdf) {
         // Extract text from the PDF with pdf-parse (runs in <1 s server-side).
         // This avoids the 10-second Vercel Hobby timeout that Sonnet + raw PDF
@@ -483,7 +493,7 @@ Supplier: ${supplierName}`
             curSubgroup = line  // grade/breed/origin sub-header
           }
         }
-        console.log('[price-list upload] pre-extracted', productLines.length, 'product lines (PDF was', pdfText.length, 'chars)')
+        console.log(`[upload] t=${wallElapsed()}ms pre-extracted ${productLines.length} product lines (PDF was ${pdfText.length} chars)`)
 
         // ── Diagnostics container ───────────────────────────────────────────
         const dx = {
@@ -591,8 +601,10 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker))
             return out
           }
+          console.log(`[upload] t=${wallElapsed()}ms starting AI pool of ${chunks.length} chunks`)
           const downstreamResults = await runPool(chunks, CHUNK_CONCURRENCY, callChunk)
-          console.log(`[upload] Pipeline done: ${dx.chunks_succeeded} ok, ${dx.chunks_failed} failed`)
+          console.log(`[upload] t=${wallElapsed()}ms AI pool done: ${dx.chunks_succeeded} ok, ${dx.chunks_failed} failed`)
+          dx.t_ai_done_ms = wallElapsed()
 
           // Merge all chunk results — count items emitted per chunk so we know
           // which chunks under-produced (truncation, partial JSON parse, etc).
@@ -772,11 +784,12 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           }
           const matched2 = dedupedPriceRows2.length
           dx.price_rows_saved = matched2
+          dx.t_total_ms = wallElapsed()
           // Final summary: total drop from PDF input to saved rows. The user
           // sees this number directly in the response and can pinpoint which
           // step caused the loss.
           dx.total_dropped_from_input = dx.product_lines_after_prefilter - matched2
-          console.log('[price-list upload] FINAL DIAGNOSTICS:', JSON.stringify(dx))
+          console.log(`[upload] t=${wallElapsed()}ms FINAL DIAGNOSTICS:`, JSON.stringify(dx))
           if (persistErr) {
             if (uploadId) {
               await supabaseAdmin.from('price_list_uploads').update({
