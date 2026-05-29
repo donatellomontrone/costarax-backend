@@ -183,17 +183,32 @@ function parseCostaraxTemplate(text, supplierName) {
   const rows = parseCsvAll(text, sep)
   if (rows.length < 2) return null
 
-  const headers = rows[0].map(h => (h || '').toLowerCase())
-  const nameIdx  = headers.findIndex(h => h === 'product_name')
-  const priceIdx = headers.findIndex(h => h === 'price_php')
+  const headers = rows[0].map(h => (h || '').toLowerCase().replace(/\s+/g, '_'))
+  // Column aliases — accept English (the canonical template) and
+  // Filipino/Tagalog so Filipino-only suppliers can fill in the template
+  // without translating headers. The backend semantics are unchanged.
+  const isHeader = (h, aliases) => aliases.includes(h)
+  const HDR = {
+    product_name: ['product_name', 'name', 'item', 'pangalan_ng_produkto', 'pangalan', 'produkto'],
+    unit:         ['unit', 'units', 'uom', 'yunit'],
+    price_php:    ['price_php', 'price', 'cost', 'presyo', 'halaga'],
+    brand:        ['brand', 'producer', 'manufacturer', 'marka', 'tatak'],
+    category:     ['category', 'cat', 'kategorya', 'kategoriya', 'uri'],
+    pack_size:    ['pack_size', 'pack_weight', 'packaging', 'sukat_ng_pakete', 'pakete'],
+    stock_qty:    ['stock_qty', 'stock', 'qty', 'quantity', 'inventory', 'available', 'stok', 'dami'],
+    moq:          ['moq', 'min_order', 'minimum_order', 'mq', 'pinakamababang_order'],
+    notes:        ['notes', 'note', 'comments', 'remarks', 'description', 'tala', 'paalala', 'puna']
+  }
+  const nameIdx  = headers.findIndex(h => isHeader(h, HDR.product_name))
+  const priceIdx = headers.findIndex(h => isHeader(h, HDR.price_php))
   if (nameIdx === -1 || priceIdx === -1) return null  // not our template
 
-  const unitIdx     = headers.findIndex(h => h === 'unit')
-  const stockIdx    = headers.findIndex(h => h === 'stock_qty')
-  const notesIdx    = headers.findIndex(h => h === 'notes')
-  const brandIdx    = headers.findIndex(h => h === 'brand' || h === 'producer')
-  const categoryIdx = headers.findIndex(h => h === 'category')
-  const packSizeIdx = headers.findIndex(h => h === 'pack_size' || h === 'pack_weight')
+  const unitIdx     = headers.findIndex(h => isHeader(h, HDR.unit))
+  const stockIdx    = headers.findIndex(h => isHeader(h, HDR.stock_qty))
+  const notesIdx    = headers.findIndex(h => isHeader(h, HDR.notes))
+  const brandIdx    = headers.findIndex(h => isHeader(h, HDR.brand))
+  const categoryIdx = headers.findIndex(h => isHeader(h, HDR.category))
+  const packSizeIdx = headers.findIndex(h => isHeader(h, HDR.pack_size))
 
   const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
   function normaliseCategory(raw) {
@@ -207,12 +222,21 @@ function parseCostaraxTemplate(text, supplierName) {
   }
   function inferCat(name) {
     const n = name.toLowerCase()
-    if (/\b(beef|pork|chicken|poultry|lamb|veal|meat|tenderloin|loin|chuck|rib|wagyu|tomahawk|striploin|strip loin|sirloin|ribeye|cube roll|t-bone|porterhouse|rack)\b/.test(n)) return 'meat'
-    if (/\b(fish|shrimp|prawn|squid|seafood|crab|lobster|salmon|tuna|tilapia|bangus|milkfish)\b/.test(n)) return 'seafood'
-    if (/\b(vegetable|fruit|egg|tomato|cabbage|onion|potato|carrot|lettuce|mushroom|herb)\b/.test(n)) return 'produce'
-    if (/\b(rice|flour|oil|sugar|salt|sauce|vinegar|canned|spice|pepper|coffee|tea|noodle|pasta|dried|powder)\b/.test(n)) return 'dry'
-    if (/\b(drink|juice|water|soda|beverage|beer|wine|alcohol)\b/.test(n)) return 'beverages'
-    if (/\b(box|bag|container|tray|packaging)\b/.test(n)) return 'packaging'
+    // Meat — EN + TL (baka/baboy/manok/lechon), specific cuts, premium grades
+    if (/\b(beef|pork|chicken|poultry|lamb|veal|duck|turkey|goat|meat|brisket|tenderloin|loin|chuck|rib|wagyu|tomahawk|striploin|strip loin|sirloin|ribeye|rib eye|cube roll|t-bone|porterhouse|rack|short loin|short rib|hanger|skirt|flank|filet|fillet|liempo|kasim|sinigang|baboy|baka|manok|hipon|itik|lechon|salami|chorizo|bacon|ham|prosciutto|jamon|sausage|longganisa|spam|hotdog|frank|patty|nugget)\b/.test(n)) return 'meat'
+    // Seafood — EN + TL fish names, shellfish
+    if (/\b(fish|shrimp|prawn|squid|seafood|crab|lobster|salmon|tuna|tilapia|bangus|milkfish|galunggong|lapu-lapu|grouper|maya-maya|snapper|mackerel|sardine|herring|anchovy|cod|haddock|catfish|hito|dilis|tahong|mussel|oyster|talaba|alimasag|alimango|hipon|sugpo|pusit|kalamares|scallop|abalone|seaweed|nori|wakame|kani)\b/.test(n)) return 'seafood'
+    // Produce — vegetables, fruits, eggs (TL terms)
+    if (/\b(vegetable|fruit|egg|tomato|cabbage|onion|potato|carrot|lettuce|mushroom|herb|garlic|ginger|chili|pepper|cucumber|eggplant|squash|zucchini|spinach|kale|broccoli|cauliflower|asparagus|corn|peas|bean|sprout|leek|celery|radish|turnip|beet|avocado|apple|banana|mango|papaya|orange|lemon|lime|pineapple|watermelon|melon|grape|berry|coconut|niyog|kamatis|sibuyas|bawang|luya|sili|patatas|kalabasa|repolyo|gulay|prutas|itlog|kangkong|pechay|ampalaya|talong|sayote)\b/.test(n)) return 'produce'
+    // Dairy — milk, cheese, butter, yogurt (TL gatas)
+    if (/\b(milk|cheese|butter|yogurt|cream|sour cream|cottage|mozzarella|cheddar|parmesan|gouda|brie|camembert|feta|ricotta|mascarpone|gatas|keso|mantikilya|tuyong gatas|condensed|evaporated|condensada|kremang)\b/.test(n)) return 'dry'
+    // Dry goods — rice, flour, oil, condiments, dry pantry
+    if (/\b(rice|flour|oil|sugar|salt|sauce|vinegar|canned|spice|pepper|coffee|tea|noodle|pasta|dried|powder|cereal|grain|grains|legume|lentil|bigas|harina|asukal|asin|toyo|patis|suka|gata|kape|mantika|sotanghon|miki|mami|bihon|misua|pancit|kakao|chocolate|cocoa|honey|pulot)\b/.test(n)) return 'dry'
+    // Beverages — drinks, juice, water, alcohol
+    if (/\b(drink|juice|water|soda|beverage|beer|wine|alcohol|whiskey|vodka|rum|gin|tequila|liqueur|spirit|cocktail|champagne|prosecco|cola|sprite|fanta|gatorade|energy drink|smoothie|shake|inumin|tubig|alak|serbesa|tubig)\b/.test(n)) return 'beverages'
+    // Packaging — containers, wrappers, disposables
+    if (/\b(box|bag|container|tray|packaging|wrap|wrapper|foil|cling|plastic|aluminum|paper|napkin|tissue|cup|plate|straw|utensil|cutlery|kahon|sako|supot|baso|plato|pakete)\b/.test(n)) return 'packaging'
+    // Fallback — dry is the broadest catch-all bucket
     return 'dry'
   }
 
