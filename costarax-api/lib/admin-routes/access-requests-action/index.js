@@ -1,5 +1,56 @@
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
-const { sendEmail, accessApprovedEmail } = require('../../email')
+const { sendEmail, accessApprovedEmail, welcomeInviteEmail } = require('../../email')
+
+// Create the auth user + generate a one-time set-password link WITHOUT
+// triggering Supabase's default invite email. Returns { userId, link }.
+// Falls back gracefully if any step fails — the caller decides whether
+// to revert the access_request claim.
+async function createUserWithBrandedInvite({ email, role, companyName }) {
+  const lower = String(email || '').trim().toLowerCase()
+  if (!lower) throw new Error('Email is required')
+
+  // 1) Create auth user. email_confirm: true skips Supabase's "confirm
+  //    your email" verification mail — we trust admin's approval.
+  const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+    email: lower,
+    email_confirm: true,
+    user_metadata: { role, company: companyName || null }
+  })
+  if (createErr) {
+    // If the user already exists (e.g. a previous failed approval), look
+    // them up and continue with a recovery link instead.
+    const isDuplicate = /already (registered|exists)|duplicate/i.test(createErr.message || '')
+    if (!isDuplicate) throw new Error(`createUser failed: ${createErr.message}`)
+  }
+  let userId = created?.user?.id || null
+  if (!userId) {
+    // Recover existing user id by listing — Supabase doesn't expose a
+    // getUserByEmail admin helper, so we paginate. Tier 1 cap should be
+    // < 1000 users for a long time.
+    const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
+    const match = (list?.users || []).find(u => (u.email || '').toLowerCase() === lower)
+    userId = match?.id || null
+  }
+  if (!userId) throw new Error('Could not resolve auth user id after createUser')
+
+  // 2) Generate a recovery link (used as both "set initial password" and
+  //    "reset password" — the destination panel on login.html is the same).
+  const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'recovery',
+    email: lower,
+    options: { redirectTo: 'https://costarax.com/login.html' }
+  })
+  if (linkErr) throw new Error(`generateLink failed: ${linkErr.message}`)
+  let link = linkData?.properties?.action_link || linkData?.action_link || null
+  if (link) {
+    try {
+      const u = new URL(link)
+      u.searchParams.set('redirect_to', 'https://costarax.com/login.html')
+      link = u.toString()
+    } catch (_) {}
+  }
+  return { userId, link }
+}
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
@@ -90,20 +141,22 @@ module.exports = async (req, res) => {
 
       if (supErr) { await revertClaim(); return res.status(500).json({ error: `Supplier creation failed: ${supErr.message}` }) }
 
-      const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
-        request.contact_email, {
-          data: { role: 'supplier', company: request.company_name },
-          redirectTo: 'https://costarax.com/login.html'
-        }
-      )
-      if (inviteErr) {
-        console.error('Invite failed for supplier:', request.contact_email, inviteErr.message)
+      // Branded invite flow (replaces Supabase's default invite email).
+      let userId = null
+      let inviteLink = null
+      try {
+        const r = await createUserWithBrandedInvite({
+          email: request.contact_email, role: 'supplier', companyName: request.company_name
+        })
+        userId = r.userId
+        inviteLink = r.link
+      } catch (e) {
+        console.error('Branded invite failed for supplier:', request.contact_email, e.message)
         // Roll back the supplier we just created so a retry doesn't dup it
         await supabaseAdmin.from('suppliers').delete().eq('id', supplier.id).catch(() => {})
         await revertClaim()
-        return res.status(500).json({ error: `Invite failed: ${inviteErr.message}. Please retry or check the email address.` })
+        return res.status(500).json({ error: `Invite failed: ${e.message}. Please retry or check the email address.` })
       }
-      const userId = invite?.user?.id
 
       if (userId) {
         await supabaseAdmin.from('profiles').upsert({
@@ -116,20 +169,29 @@ module.exports = async (req, res) => {
 
       // Note: access_requests.status was already set to 'approved' (with
       // reviewed_at + reviewed_by) by the atomic claim at the top of this
-      // handler. No need to update it again here.
+      // handler.
       await supabaseAdmin.from('admin_actions').insert({
         admin_id: auth.user.id, action_type: 'approve_supplier_request',
         target_id: supplier.id,
         notes: `Approved supplier: ${request.company_name} (${request.contact_email})`
       })
 
+      // Send our branded welcome email with the set-password link. This
+      // is the SINGLE email the supplier should receive — there's also
+      // the legacy accessApprovedEmail confirmation; drop it to avoid
+      // sending two consecutive "approved" emails.
       if (request.contact_email) {
-        const tpl = accessApprovedEmail({ companyName: request.company_name, contactEmail: request.contact_email })
+        const tpl = welcomeInviteEmail({
+          companyName: request.company_name,
+          contactEmail: request.contact_email,
+          role: 'supplier',
+          inviteLink
+        })
         await sendEmail({ to: request.contact_email, ...tpl })
       }
 
       return res.status(200).json({
-        message: `${request.company_name} approved as supplier. ${userId ? 'Invite email sent.' : 'No email sent — add SMTP credentials.'}`,
+        message: `${request.company_name} approved as supplier. Welcome email sent.`,
         supplier_id: supplier.id
       })
 
@@ -143,19 +205,20 @@ module.exports = async (req, res) => {
 
       if (bizErr) { await revertClaim(); return res.status(500).json({ error: `Business creation failed: ${bizErr.message}` }) }
 
-      const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
-        request.contact_email, {
-          data: { role: 'buyer', company: request.company_name },
-          redirectTo: 'https://costarax.com/login.html'
-        }
-      )
-      if (inviteErr) {
-        console.error('Invite failed for buyer:', request.contact_email, inviteErr.message)
+      let userId = null
+      let inviteLink = null
+      try {
+        const r = await createUserWithBrandedInvite({
+          email: request.contact_email, role: 'buyer', companyName: request.company_name
+        })
+        userId = r.userId
+        inviteLink = r.link
+      } catch (e) {
+        console.error('Branded invite failed for buyer:', request.contact_email, e.message)
         await supabaseAdmin.from('businesses').delete().eq('id', biz.id).catch(() => {})
         await revertClaim()
-        return res.status(500).json({ error: `Invite failed: ${inviteErr.message}. Please retry or check the email address.` })
+        return res.status(500).json({ error: `Invite failed: ${e.message}. Please retry or check the email address.` })
       }
-      const userId = invite?.user?.id
 
       if (userId) {
         await supabaseAdmin.from('profiles').upsert({
@@ -172,12 +235,19 @@ module.exports = async (req, res) => {
         target_id: biz.id, notes: `Approved buyer: ${request.company_name}`
       })
 
+      // Single branded welcome email (replaces both the Supabase default
+      // invite and the legacy accessApprovedEmail).
       if (request.contact_email) {
-        const tpl = accessApprovedEmail({ companyName: request.company_name, contactEmail: request.contact_email })
+        const tpl = welcomeInviteEmail({
+          companyName: request.company_name,
+          contactEmail: request.contact_email,
+          role: 'buyer',
+          inviteLink
+        })
         await sendEmail({ to: request.contact_email, ...tpl })
       }
 
-      return res.status(200).json({ message: `${request.company_name} approved as buyer`, business_id: biz.id })
+      return res.status(200).json({ message: `${request.company_name} approved as buyer. Welcome email sent.`, business_id: biz.id })
     }
   }
 

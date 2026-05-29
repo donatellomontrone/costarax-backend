@@ -264,11 +264,57 @@ function watchlistPriceAlertEmail({ buyerName, alerts }) {
   return { subject: `Price alert: ${alerts.length} watchlist product${alerts.length > 1 ? 's' : ''} moved — Costarax`, html: layout('Price alert — Costarax', body) }
 }
 
+// ── Branded replacements for Supabase's default Auth emails ──────────────────
+// The Supabase default invite / recovery emails come from
+// noreply@mail.app.supabase.io with no logo, no branding, and an awkward
+// "powered by Supabase ⚡" footer. We bypass them by:
+//   1. Creating the auth user with createUser (which does NOT send mail)
+//   2. Generating the action link with generateLink (also no mail)
+//   3. Sending OUR own email using these templates via the configured
+//      SMTP / Resend provider with the Costarax brand
+// Run users/admin must also disable the corresponding default templates
+// in Supabase Dashboard → Authentication → Email Templates so the
+// platform doesn't double-send.
+
+function welcomeInviteEmail({ companyName, contactEmail, role, inviteLink }) {
+  const roleLabel = role === 'admin'    ? 'Administrator'
+                  : role === 'supplier' ? 'Supplier'
+                  : 'Business buyer'
+  const helloName = companyName ? `, ${companyName}` : ''
+  const body = `
+    ${h2(`Welcome to Costarax${helloName}!`)}
+    ${p(`Your ${roleLabel.toLowerCase()} account has been approved and is ready to use.`)}
+    ${p('Click the button below to <strong>set your password</strong> and sign in for the first time. The link is valid for 24 hours.')}
+    ${btn(inviteLink || `${APP_URL}/login.html`, 'Set my password')}
+    ${table(
+      row('Login email:', contactEmail || '—'),
+      row('Account type:', roleLabel),
+      row('Platform:', `<a href="${APP_URL}/login.html" style="color:#1A5C3A;">${APP_URL}/login.html</a>`)
+    )}
+    ${highlight(`<strong>Tip:</strong> bookmark <a href="${APP_URL}/login.html" style="color:#123F28;font-weight:700">costarax.com/login.html</a> so you can log in any time from any device.`)}
+    ${p('<span style="font-size:12px;color:#7A7870;">If you didn\'t expect this email, you can safely ignore it. No account was created without administrator approval.</span>')}
+  `
+  return { subject: `Welcome to Costarax — set your password to sign in`, html: layout('Welcome — Costarax', body) }
+}
+
+function passwordResetEmail({ contactEmail, resetLink }) {
+  const body = `
+    ${h2('Reset your password')}
+    ${p(`A password reset was requested for your Costarax account (<strong>${contactEmail}</strong>).`)}
+    ${p('Click the button below to choose a new password. The link is valid for 1 hour.')}
+    ${btn(resetLink || `${APP_URL}/login.html`, 'Reset my password')}
+    ${highlight(`<strong>Didn't request this?</strong> You can safely ignore this email — your password won't change unless you click the link above.`)}
+    ${p('<span style="font-size:12px;color:#7A7870;">For security, this link can only be used once and will expire shortly. If you need a new link, request another reset from the login screen.</span>')}
+  `
+  return { subject: 'Reset your Costarax password', html: layout('Reset password — Costarax', body) }
+}
+
 module.exports = {
   sendEmail,
   quoteReceivedEmail, quoteRepliedEmail,
   accessRequestEmail, accessApprovedEmail,
   adminCreatedAccountEmail, adminRoleChangedEmail,
+  welcomeInviteEmail, passwordResetEmail,
   orderConfirmedEmail, orderFulfilledEmail,
   orderPreparingEmail, orderDispatchedEmail, orderDeliveredSupplierEmail,
   watchlistPriceAlertEmail,

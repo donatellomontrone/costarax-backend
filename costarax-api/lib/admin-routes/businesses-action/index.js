@@ -1,5 +1,36 @@
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
-const { sendEmail, accessApprovedEmail } = require('../../email')
+const { sendEmail, welcomeInviteEmail } = require('../../email')
+
+// Same helper used by access-requests-action — create the auth user and
+// generate a one-time set-password link without triggering the Supabase
+// default invite email.
+async function createUserWithBrandedInvite({ email, role, companyName }) {
+  const lower = String(email || '').trim().toLowerCase()
+  if (!lower) throw new Error('Email is required')
+  const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+    email: lower, email_confirm: true,
+    user_metadata: { role, company: companyName || null }
+  })
+  if (createErr && !/already (registered|exists)|duplicate/i.test(createErr.message || '')) {
+    throw new Error(`createUser failed: ${createErr.message}`)
+  }
+  let userId = created?.user?.id || null
+  if (!userId) {
+    const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
+    userId = (list?.users || []).find(u => (u.email || '').toLowerCase() === lower)?.id || null
+  }
+  if (!userId) throw new Error('Could not resolve auth user id after createUser')
+  const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'recovery', email: lower,
+    options: { redirectTo: 'https://costarax.com/login.html' }
+  })
+  if (linkErr) throw new Error(`generateLink failed: ${linkErr.message}`)
+  let link = linkData?.properties?.action_link || linkData?.action_link || null
+  if (link) {
+    try { const u = new URL(link); u.searchParams.set('redirect_to', 'https://costarax.com/login.html'); link = u.toString() } catch (_) {}
+  }
+  return { userId, link }
+}
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
@@ -18,31 +49,22 @@ module.exports = async (req, res) => {
     const { error } = await supabaseAdmin.from('businesses').update({ status: 'approved', approved_at: new Date().toISOString() }).eq('id', id)
     if (error) return res.status(500).json({ error: error.message })
 
-    // Send an invite so the buyer can actually log in. Previously this
-    // path only flipped status — the buyer received an approval email but
-    // had no account to sign into. Now we mirror the supplier-approve
-    // flow: create auth user via inviteUserByEmail, upsert profile with
-    // role=buyer, and create the organization_members link.
+    // Branded invite flow — replaces Supabase's default invite email.
     let inviteSent = false
     let userId = null
+    let inviteLink = null
     if (biz.contact_email) {
       try {
-        const { data: invite, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
-          biz.contact_email, {
-            data: { role: 'buyer', company: biz.name },
-            redirectTo: 'https://costarax.com/login.html'
-          }
-        )
-        if (inviteErr) {
-          // Soft-fail: log but don't undo the approval — the admin can
-          // manually invite from Users tab as a recovery path.
-          console.warn('[approve-business] invite failed:', biz.contact_email, inviteErr.message)
-        } else {
-          inviteSent = true
-          userId = invite?.user?.id || null
-        }
+        const r = await createUserWithBrandedInvite({
+          email: biz.contact_email, role: 'buyer', companyName: biz.name
+        })
+        userId = r.userId
+        inviteLink = r.link
+        inviteSent = !!inviteLink
       } catch (e) {
-        console.warn('[approve-business] invite threw:', e.message)
+        // Soft-fail: log but don't undo the approval — the admin can
+        // manually re-send from Users tab as a recovery path.
+        console.warn('[approve-business] branded invite failed:', biz.contact_email, e.message)
       }
 
       if (userId) {
@@ -61,13 +83,20 @@ module.exports = async (req, res) => {
 
     await supabaseAdmin.from('admin_actions').insert({
       admin_id: auth.user.id, action_type: 'approve_business', target_id: id,
-      notes: `Approved: ${biz.name}${inviteSent ? ' · invite sent' : ' · no invite (no email or invite failed)'}`
+      notes: `Approved: ${biz.name}${inviteSent ? ' · branded invite sent' : ' · no invite (no email or invite failed)'}`
     })
-    if (biz.contact_email) {
-      const tpl = accessApprovedEmail({ companyName: biz.name, contactEmail: biz.contact_email })
+
+    // Single branded welcome email with set-password link.
+    if (biz.contact_email && inviteSent) {
+      const tpl = welcomeInviteEmail({
+        companyName: biz.name,
+        contactEmail: biz.contact_email,
+        role: 'buyer',
+        inviteLink
+      })
       await sendEmail({ to: biz.contact_email, ...tpl })
     }
-    return res.status(200).json({ message: `${biz.name} approved${inviteSent ? ' (invite sent)' : ''}`, inviteSent })
+    return res.status(200).json({ message: `${biz.name} approved${inviteSent ? ' (welcome email sent)' : ''}`, inviteSent })
   }
 
   // ── REJECT ────────────────────────────────────────────────────────────────
