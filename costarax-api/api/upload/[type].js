@@ -568,34 +568,55 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           const CHUNK_CONCURRENCY = 6
           console.log(`[upload] Pipeline: ${chunks.length} chunks, concurrency=${CHUNK_CONCURRENCY}`)
 
+          const callChunkOnce = async (chunk) => anthropicInner.messages.create({
+            model,
+            max_tokens: 8000,
+            temperature: 0,
+            system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
+            messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
+          })
+          const isRateLimit = (e) => e && (e.status === 429 || /rate.?limit|too many requests|concurrent connections/i.test(e.message || ''))
+
           const callChunk = async (chunk, idx) => {
             const lineCount = chunk.split('\n').length
             dx.chunk_input_lines_total += lineCount
-            try {
-              const r = await anthropicInner.messages.create({
-                model,
-                max_tokens: 8000,
-                temperature: 0,
-                system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
-                messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
-              })
-              const text = r.content?.[0]?.text?.trim() || ''
-              const truncated = r.stop_reason === 'max_tokens'
-              console.log(`[chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount}`)
-              dx.chunks_succeeded += 1
-              dx.chunks_succeeded_on_first_try += 1
-              if (truncated) {
-                dx.chunks_truncated += 1
-                dx.truncated_chunk_ids.push(idx)
-              }
-              return { idx, text, lines_in: lineCount }
-            } catch (e) {
-              const tag = e.status === 429 ? 'RATE_LIMITED' : (e.status ? `HTTP_${e.status}` : 'ERROR')
-              console.error(`[chunk ${idx}] ${tag}: ${(e.message || '').slice(0, 200)}`)
+
+            // Custom retry: short backoff (300-800 ms) on 429, ONE retry max.
+            // SDK's internal retry is disabled (maxRetries: 0) because its
+            // exponential backoff up to ~60 s could stall the whole function.
+            // With our concurrency cap of 6 < 9, 429s should be rare.
+            let r = null
+            let lastErr = null
+            try { r = await callChunkOnce(chunk) }
+            catch (e) { lastErr = e }
+            const usedRetry = !r && isRateLimit(lastErr)
+            if (usedRetry) {
+              dx.retries_attempted += 1
+              const delay = 300 + Math.floor(Math.random() * 500)
+              console.warn(`[chunk ${idx}] RATE_LIMITED — retrying in ${delay}ms`)
+              await new Promise(res => setTimeout(res, delay))
+              try { r = await callChunkOnce(chunk); lastErr = null }
+              catch (e) { lastErr = e }
+            }
+
+            if (!r) {
+              const tag = lastErr?.status === 429 ? 'RATE_LIMITED' : (lastErr?.status ? `HTTP_${lastErr.status}` : 'ERROR')
+              console.error(`[chunk ${idx}] ${tag}: ${(lastErr?.message || '').slice(0, 200)}`)
               dx.chunks_failed += 1
-              dx.failed_chunk_ids.push({ idx, error: e.message || 'unknown', status: e.status || null })
+              dx.failed_chunk_ids.push({ idx, error: lastErr?.message || 'unknown', status: lastErr?.status || null })
               return { idx, text: '', lines_in: lineCount }
             }
+            const text = r.content?.[0]?.text?.trim() || ''
+            const truncated = r.stop_reason === 'max_tokens'
+            console.log(`[chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount} retry=${usedRetry}`)
+            dx.chunks_succeeded += 1
+            if (usedRetry) dx.chunks_succeeded_on_retry += 1
+            else dx.chunks_succeeded_on_first_try += 1
+            if (truncated) {
+              dx.chunks_truncated += 1
+              dx.truncated_chunk_ids.push(idx)
+            }
+            return { idx, text, lines_in: lineCount }
           }
 
           // Worker-pool runner: N workers each pull the next unassigned
@@ -674,8 +695,23 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           dx.after_autorename = extracted.length
           dx.autorenamed_count = renameCount
           console.log('[price-list upload] extracted after dedup+filter:', extracted.length, 'renamed:', renameCount)
-          // Skip the normal single-call path below
-          if (!extracted.length) throw new Error('No products could be extracted from the PDF text.')
+          // If everything came back empty, return 500 WITH the diagnostics so
+          // we can see exactly why (all chunks failed? JSON parse? truncated?)
+          // instead of just throwing an opaque error.
+          if (!extracted.length) {
+            console.error('[upload] All chunks empty after pipeline:', JSON.stringify(dx))
+            if (uploadId) {
+              await supabaseAdmin.from('price_list_uploads').update({
+                status: 'rejected',
+                ai_summary: JSON.stringify({ error: 'No items extracted', diagnostics: dx })
+              }).eq('id', uploadId).catch(() => {})
+            }
+            return res.status(500).json({
+              error: 'No products could be extracted from the PDF. All AI chunks returned empty.',
+              detail: `${dx.chunks_failed} chunks failed (of ${dx.chunks_total}). Check diagnostics for per-chunk error.`,
+              diagnostics: dx
+            })
+          }
           // Jump straight to DB upsert — bypass the single-call code.
           // Strict (canonical_name, default_unit) match against the catalog —
           // mirrors the XLSX template path. The previous fuzzy matcher
