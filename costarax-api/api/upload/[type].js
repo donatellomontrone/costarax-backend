@@ -382,7 +382,13 @@ stock rules: if the source row has a stock/qty/available/inventory column with a
 Category rules: meat=beef/lamb/pork/chicken/poultry/foie gras, seafood=fish/shrimp/squid/scallop/oyster/crab, produce=vegetables/fruits/eggs/potato products, dry=rice/flour/oil/canned/spices/pasta/condiments, beverages=drinks/juice/water/coffee/milk, packaging=boxes/bags/containers.
 Supplier: ${supplierName}`
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+    // maxRetries: 0 disables the SDK's internal exponential-backoff retry on
+    // 429 / 5xx. We handle retries ourselves with bounded concurrency so we
+    // know exactly how long a chunk can take. With the default (2 internal
+    // retries × up to 60 s backoff each), a single rate-limited chunk could
+    // silently block for ~2 minutes inside the SDK and cause a 504 even
+    // though our outer code looks fine.
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 })
     let userContent
     // Always use Haiku — it's fast enough to finish within Vercel Hobby's 10-second
     // function limit. PDFs are pre-processed into text server-side with pdf-parse
@@ -516,13 +522,12 @@ Supplier: ${supplierName}`
           after_autorename: 0,
         }
 
-        // Chunk by product lines. Each item's JSON (name, canonical, price,
-        // unit, category, producer, brand, cut_type, grade_spec,
-        // origin_series, form_factor, pack_weight, stock) is ~140-180
-        // output tokens. With LINES_PER_CHUNK=40 × max_tokens=8000 the
-        // output fits comfortably. 16 chunks × 40 lines = 640 product capacity.
-        const LINES_PER_CHUNK = 40
-        const MAX_CHUNKS = 16
+        // Smaller chunks = faster per-call AI completion = lower wall time.
+        // 25 lines × ~175 tok/item ≈ 4400 output tokens per chunk (~5 s on
+        // Haiku 4.5). 25 chunks × 25 lines = 625-line capacity (enough for
+        // most price lists).
+        const LINES_PER_CHUNK = 25
+        const MAX_CHUNKS = 25
 
         if (productLines.length > 0) {
           const chunks = []
@@ -530,7 +535,10 @@ Supplier: ${supplierName}`
             chunks.push(productLines.slice(i, i + LINES_PER_CHUNK).join('\n'))
           }
           dx.chunks_total = chunks.length
-          const anthropicInner = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+          // maxRetries: 0 — handle retry logic in our own bounded pool. The
+          // SDK's default internal retry on 429 would otherwise silently stall
+          // a chunk for up to ~2 minutes and trigger Vercel's 504 timeout.
+          const anthropicInner = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 })
           // Simplified prompt for clean pre-processed input:
           // each line is already "SECTION > Sub-group | Name Specs Brand Price/unit"
           const chunkRule = `${ruleBlock}
@@ -553,7 +561,11 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           // returning network errors even on Pro — likely due to a subtle
           // bug in the merge / diagnostics roll-up. Worker pool is simpler
           // and easier to reason about.
-          const CHUNK_CONCURRENCY = 7
+          // Concurrency 6: comfortably under Anthropic's observed ~9
+          // concurrent-connection ceiling so we never hit 429. With chunks
+          // of 25 lines (~5 s each) and 25 chunks total, wall time is
+          // 25 ÷ 6 ≈ 4.2 waves × 5 s ≈ 21 s. Pro 60 s budget fits easily.
+          const CHUNK_CONCURRENCY = 6
           console.log(`[upload] Pipeline: ${chunks.length} chunks, concurrency=${CHUNK_CONCURRENCY}`)
 
           const callChunk = async (chunk, idx) => {
@@ -857,7 +869,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           if (cur && textChunks.length < MAX_CHUNKS) textChunks.push(cur)
 
           console.log(`[price-list upload] text chunking: ${textChunks.length} chunks (~${text.length} chars total)`)
-          const anthropicInner2 = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+          const anthropicInner2 = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 })
           const chunkResults2 = await Promise.all(textChunks.map((chunk, idx) =>
             anthropicInner2.messages.create({
               model, max_tokens: 6000, temperature: 0,
