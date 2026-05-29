@@ -9,6 +9,10 @@
     "api/**/*.js": {
       "memory": 512,
       "maxDuration": 60
+    },
+    "api/upload/[type].js": {
+      "memory": 1024,
+      "maxDuration": 60
     }
   },
   "rewrites": [
