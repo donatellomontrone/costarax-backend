@@ -514,12 +514,6 @@ Supplier: ${supplierName}`
         // output fits comfortably. 16 chunks × 40 lines = 640 product capacity.
         const LINES_PER_CHUNK = 40
         const MAX_CHUNKS = 16
-        // Wave size: how many chunks to fire in parallel before waiting.
-        // Anthropic returns HTTP 429 when too many concurrent requests hit
-        // simultaneously; the .catch() then swallows the error and that whole
-        // chunk's products disappear silently. Waves of 8 mean at most 2
-        // waves for a 16-chunk PDF (~5-7 s wall time, fits Vercel's 10 s).
-        const WAVE_SIZE = 8
 
         if (productLines.length > 0) {
           const chunks = []
@@ -535,42 +529,58 @@ Format: each line is one product. Lines may be prefixed with "SECTION > Sub-grou
 Use the context to build a complete canonical name (e.g. "CHILLED BEEF > F1 Wagyu | Tenderloin MS6-7 … Sanchoku" → canonical "Sanchoku F1 Wagyu Tenderloin Marble Score 6-7").
 IMPORTANT: Every input line MUST become one item in the output JSON array. Do not skip lines. If you can't parse a line, still emit it with whatever fields you can extract.`
 
-          // Run chunks in waves to avoid rate-limit cliff.
+          // Fire all chunks in parallel. Wave-batching was ditched because the
+          // doubled wall time (~6-10 s) pushed the function past Vercel Hobby's
+          // 10 s timeout, causing the whole upload to fail with a network error.
+          // Rate-limit safety comes from a single per-chunk retry on HTTP 429
+          // with short jittered backoff (~600-1000 ms) — adds latency only to
+          // the chunks that actually hit the limit, not to the happy path.
+          const callChunkOnce = async (chunk) => {
+            return anthropicInner.messages.create({
+              model,
+              max_tokens: 8000,
+              temperature: 0,
+              system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
+              messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
+            })
+          }
+          const isRateLimit = (e) => e && (e.status === 429 || /rate.?limit|too many requests/i.test(e.message || ''))
+
           const callChunk = async (chunk, idx) => {
             const lineCount = chunk.split('\n').length
             dx.chunk_input_lines_total += lineCount
-            try {
-              const r = await anthropicInner.messages.create({
-                model,
-                max_tokens: 8000,
-                temperature: 0,
-                system: 'You are a JSON extraction API. Output ONLY a valid JSON array. No markdown, no explanation, no text outside the JSON array. Every input line MUST produce one array element.',
-                messages: [{ role: 'user', content: `${chunkRule}\n---\n${chunk}\n---\nJSON:` }]
-              })
-              const text = r.content?.[0]?.text?.trim() || ''
-              const truncated = r.stop_reason === 'max_tokens'
-              console.log(`[price-list chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount}`)
-              if (truncated) {
-                console.warn(`[price-list chunk ${idx}] ⚠ OUTPUT TRUNCATED at max_tokens — items lost`)
-                dx.chunks_truncated += 1
-                dx.truncated_chunk_ids.push(idx)
-              }
-              dx.chunks_succeeded += 1
-              return { idx, text, lines_in: lineCount }
-            } catch (e) {
-              const tag = e.status === 429 ? 'RATE_LIMITED' : (e.status ? `HTTP_${e.status}` : 'ERROR')
-              console.error(`[price-list chunk ${idx}] ${tag}:`, e.message)
+            let r = null
+            let lastErr = null
+            // First attempt
+            try { r = await callChunkOnce(chunk) }
+            catch (e) { lastErr = e }
+            // One retry on rate-limit (random backoff to spread the herd)
+            if (!r && isRateLimit(lastErr)) {
+              const delay = 600 + Math.floor(Math.random() * 400)
+              console.warn(`[price-list chunk ${idx}] RATE_LIMITED — retrying in ${delay}ms`)
+              await new Promise(res => setTimeout(res, delay))
+              try { r = await callChunkOnce(chunk); lastErr = null }
+              catch (e) { lastErr = e }
+            }
+            if (!r) {
+              const tag = lastErr?.status === 429 ? 'RATE_LIMITED' : (lastErr?.status ? `HTTP_${lastErr.status}` : 'ERROR')
+              console.error(`[price-list chunk ${idx}] ${tag} after retry:`, lastErr?.message)
               dx.chunks_failed += 1
-              dx.failed_chunk_ids.push({ idx, error: e.message, status: e.status || null })
+              dx.failed_chunk_ids.push({ idx, error: lastErr?.message || 'unknown', status: lastErr?.status || null })
               return { idx, text: '', lines_in: lineCount }
             }
+            const text = r.content?.[0]?.text?.trim() || ''
+            const truncated = r.stop_reason === 'max_tokens'
+            console.log(`[price-list chunk ${idx}] in=${r.usage?.input_tokens} out=${r.usage?.output_tokens} len=${text.length} stop=${r.stop_reason} lines_in=${lineCount}`)
+            if (truncated) {
+              console.warn(`[price-list chunk ${idx}] ⚠ OUTPUT TRUNCATED at max_tokens — items lost`)
+              dx.chunks_truncated += 1
+              dx.truncated_chunk_ids.push(idx)
+            }
+            dx.chunks_succeeded += 1
+            return { idx, text, lines_in: lineCount }
           }
-          const results = []
-          for (let waveStart = 0; waveStart < chunks.length; waveStart += WAVE_SIZE) {
-            const wave = chunks.slice(waveStart, waveStart + WAVE_SIZE)
-            const waveResults = await Promise.all(wave.map((chunk, j) => callChunk(chunk, waveStart + j)))
-            results.push(...waveResults)
-          }
+          const results = await Promise.all(chunks.map((chunk, idx) => callChunk(chunk, idx)))
 
           // Merge all chunk results — count items emitted per chunk so we know
           // which chunks under-produced (truncation, partial JSON parse, etc).
