@@ -308,10 +308,20 @@ async function handlePriceList(req, res) {
   let body
   try { body = await readJsonBody(req) } catch (e) { return res.status(400).json({ error: e.message }) }
   // Accept either pasted text OR a base64-encoded file (PDF / image) for Claude Vision.
-  const { text, file_name, file_b64, file_mime } = body || {}
+  //
+  // Two-step preview flow added on top of the legacy single-step flow:
+  //   - dry_run: true → parse the file/text and return the extracted items
+  //     without touching the DB. The frontend renders them in an editable
+  //     preview modal.
+  //   - items: [...] → the frontend posts the (possibly edited) items
+  //     back here. We skip parsing entirely and feed them straight into
+  //     the catalog-match + DB-write pipeline.
+  // Old clients keep working unchanged.
+  const { text, file_name, file_b64, file_mime, dry_run, items: providedItems } = body || {}
   const hasText = typeof text === 'string' && text.trim().length >= 10
   const hasFile = typeof file_b64 === 'string' && file_b64.length > 100 && typeof file_mime === 'string'
-  if (!hasText && !hasFile) return res.status(400).json({ error: 'No content provided' })
+  const hasItems = Array.isArray(providedItems) && providedItems.length > 0
+  if (!hasText && !hasFile && !hasItems) return res.status(400).json({ error: 'No content provided' })
   // Vercel Hobby plan caps JSON bodies at 4.5 MB. Stay safely under: ~3 MB raw
   // → ~4 MB base64. Bigger PDFs should be split or compressed client-side first.
   if (hasFile && file_b64.length > 4_000_000) {
@@ -393,6 +403,47 @@ async function handlePriceList(req, res) {
   // "Sanchoku Tenderloin MS4-5") onto a stale catalog entry from a
   // previous upload, which then get further dedup'd by collapsePriceRows.
   let useStrictMatching = false
+
+  // ── Two-step flow short-circuits ─────────────────────────────────────────
+  // 1) Frontend posts items directly (after the user confirmed the preview):
+  //    skip parse and feed them into the catalog-match + save pipeline.
+  // 2) Frontend posts dry_run + text: parse only, return items, no DB write.
+  if (hasItems) {
+    extracted = providedItems.map(it => ({
+      name: String(it.name || it.canonical || '').trim(),
+      canonical: String(it.canonical || it.name || '').trim(),
+      price: Number(it.price) || 0,
+      unit: String(it.unit || 'kg').trim(),
+      stock: it.stock == null || it.stock === '' ? null : Number(it.stock),
+      category: it.category || null,
+      brand: it.brand || null,
+      producer: it.producer || it.brand || null,
+      pack_weight: it.pack_weight || it.pack_size || null,
+      notes: it.notes || null,
+    })).filter(it => it.name && it.price > 0)
+    useStrictMatching = true
+  } else if (dry_run && hasText) {
+    const tmplItems = parseCostaraxTemplate(text, supplierName)
+    if (!tmplItems || tmplItems.length === 0) {
+      if (uploadId) {
+        await supabaseAdmin.from('price_list_uploads').update({
+          status: 'rejected',
+          ai_summary: JSON.stringify({ error: 'Template parse returned no items' })
+        }).eq('id', uploadId)
+      }
+      return res.status(422).json({
+        error: 'No products found in the template. Check that the header row matches and rows have product_name + unit + price_php.',
+        upload_id: uploadId
+      })
+    }
+    return res.status(200).json({
+      preview: true,
+      items: tmplItems,
+      count: tmplItems.length,
+      upload_id: uploadId,
+      message: `Parsed ${tmplItems.length} products. Review and confirm to save.`
+    })
+  }
   try {
     // Compact 5-field schema: canonical, price, unit, category, stock.
     // The downstream backend (inferStructuredProductMeta) already extracts
