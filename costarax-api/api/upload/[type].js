@@ -188,11 +188,23 @@ function parseCostaraxTemplate(text, supplierName) {
   const priceIdx = headers.findIndex(h => h === 'price_php')
   if (nameIdx === -1 || priceIdx === -1) return null  // not our template
 
-  const unitIdx  = headers.findIndex(h => h === 'unit')
-  const stockIdx = headers.findIndex(h => h === 'stock_qty')
-  const notesIdx = headers.findIndex(h => h === 'notes')
+  const unitIdx     = headers.findIndex(h => h === 'unit')
+  const stockIdx    = headers.findIndex(h => h === 'stock_qty')
+  const notesIdx    = headers.findIndex(h => h === 'notes')
+  const brandIdx    = headers.findIndex(h => h === 'brand' || h === 'producer')
+  const categoryIdx = headers.findIndex(h => h === 'category')
+  const packSizeIdx = headers.findIndex(h => h === 'pack_size' || h === 'pack_weight')
 
   const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
+  function normaliseCategory(raw) {
+    if (!raw) return null
+    const c = String(raw).toLowerCase().trim()
+    if (VALID_CATS.includes(c)) return c
+    if (c === 'dry goods' || c === 'dry_goods') return 'dry'
+    if (c === 'beverage') return 'beverages'
+    if (c === 'fish' || c === 'seafood ') return 'seafood'
+    return null
+  }
   function inferCat(name) {
     const n = name.toLowerCase()
     if (/\b(beef|pork|chicken|poultry|lamb|veal|meat|tenderloin|loin|chuck|rib|wagyu|tomahawk|striploin|strip loin|sirloin|ribeye|cube roll|t-bone|porterhouse|rack)\b/.test(n)) return 'meat'
@@ -221,17 +233,31 @@ function parseCostaraxTemplate(text, supplierName) {
     const unit = unitIdx >= 0 ? (cells[unitIdx] || '').replace(/\s+/g, ' ').trim() || 'kg' : 'kg'
     const stockRaw = stockIdx >= 0 ? (cells[stockIdx] || '').trim() : ''
     const notes = notesIdx >= 0 ? (cells[notesIdx] || '').replace(/\s+/g, ' ').trim() : ''
+    const brandRaw    = brandIdx    >= 0 ? (cells[brandIdx]    || '').replace(/\s+/g, ' ').trim() : ''
+    const categoryRaw = categoryIdx >= 0 ? (cells[categoryIdx] || '').trim() : ''
+    const packSize    = packSizeIdx >= 0 ? (cells[packSizeIdx] || '').replace(/\s+/g, ' ').trim() : ''
 
     const stockN = parseFloat(stockRaw)
     const stock = stockRaw === '' ? null : (isFinite(stockN) && stockN >= 0 ? stockN : null)
 
-    // Build canonical: prepend brand from notes if it's a short brand-looking string
-    // and not already in the product name
+    // Build canonical name:
+    //   1. Prefer the explicit `brand` column if the supplier filled it.
+    //   2. Fall back to the legacy behaviour of treating a short
+    //      notes value as a brand (backwards compat with old templates
+    //      that didn't have a brand column).
+    let brand = brandRaw || null
+    if (!brand && notes && notes.length > 0 && notes.length < 40 && /^[A-Za-z0-9]/.test(notes)) {
+      brand = notes
+    }
     let canonical = rawName
-    if (notes && notes.length > 0 && notes.length < 40 && /^[A-Za-z0-9]/.test(notes)) {
-      if (!rawName.toLowerCase().includes(notes.toLowerCase())) {
-        canonical = `${notes} ${rawName}`
-      }
+    if (brand && !rawName.toLowerCase().includes(brand.toLowerCase())) {
+      canonical = `${brand} ${rawName}`
+    }
+
+    // Append pack_size when meaningful so the catalog disambiguates
+    // "Tenderloin 5kg slab" from "Tenderloin 1kg vac pack".
+    if (packSize && !canonical.toLowerCase().includes(packSize.toLowerCase())) {
+      canonical = `${canonical} (${packSize})`
     }
 
     // Disambiguate duplicates: same canonical+unit with a different price gets " (N)"
@@ -240,14 +266,21 @@ function parseCostaraxTemplate(text, supplierName) {
     if (seenCount > 0) canonical = `${canonical} (${seenCount + 1})`
     seenKeyCount.set(dedupKey, seenCount + 1)
 
+    // Use the explicit category when valid, otherwise infer from the
+    // canonical name. The downstream catalog upsert requires one of the
+    // VALID_CATS values.
+    const category = normaliseCategory(categoryRaw) || inferCat(canonical)
+
     items.push({
       name: rawName,
       canonical,
       price,
       unit,
       stock,
-      category: inferCat(canonical),
-      producer: notes || null,
+      category,
+      brand: brand || null,
+      producer: brand || notes || null,
+      pack_weight: packSize || null,
     })
   }
 
