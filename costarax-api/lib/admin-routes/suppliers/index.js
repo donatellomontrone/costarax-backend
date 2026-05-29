@@ -1,4 +1,36 @@
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
+const { sendEmail, welcomeInviteEmail } = require('../../email')
+
+// Same branded-invite helper used by access-requests-action and
+// businesses-action. Creates the auth user, generates a set-password
+// link, returns both — never sends the Supabase default invite email.
+async function createUserWithBrandedInvite({ email, role, companyName }) {
+  const lower = String(email || '').trim().toLowerCase()
+  if (!lower) throw new Error('Email is required')
+  const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+    email: lower, email_confirm: true,
+    user_metadata: { role, company: companyName || null }
+  })
+  if (createErr && !/already (registered|exists)|duplicate/i.test(createErr.message || '')) {
+    throw new Error(`createUser failed: ${createErr.message}`)
+  }
+  let userId = created?.user?.id || null
+  if (!userId) {
+    const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
+    userId = (list?.users || []).find(u => (u.email || '').toLowerCase() === lower)?.id || null
+  }
+  if (!userId) throw new Error('Could not resolve auth user id after createUser')
+  const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'recovery', email: lower,
+    options: { redirectTo: 'https://costarax.com/login.html' }
+  })
+  if (linkErr) throw new Error(`generateLink failed: ${linkErr.message}`)
+  let link = linkData?.properties?.action_link || linkData?.action_link || null
+  if (link) {
+    try { const u = new URL(link); u.searchParams.set('redirect_to', 'https://costarax.com/login.html'); link = u.toString() } catch (_) {}
+  }
+  return { userId, link }
+}
 
 module.exports = async (req, res) => {
   const auth = await requireAdmin(req, res)
@@ -116,20 +148,22 @@ module.exports = async (req, res) => {
     return res.status(200).json(enriched)
   }
 
-  // POST — create new supplier
+  // POST — create new supplier (optionally with linked auth user + invite)
   if (req.method === 'POST') {
-    const { name, category, tagline, city, region, minimum_order_php, tin, delivery_coverage } = req.body
+    const { name, category, categories, tagline, city, region, minimum_order_php, tin, delivery_coverage, contact_email } = req.body
     if (!name || !category) return res.status(400).json({ error: 'name and category are required' })
 
     const { data, error } = await supabaseAdmin.from('suppliers').insert({
       name: name.trim(),
       legal_name: name.trim(),
       category,
+      categories: Array.isArray(categories) && categories.length ? categories : [category],
       tagline: tagline?.trim() || null,
       city: city?.trim() || null,
       region: region?.trim() || null,
       minimum_order_php: minimum_order_php || 1000,
       tin: tin?.trim() || null,
+      contact_email: contact_email?.trim() || null,
       delivery_coverage: delivery_coverage?.trim() || null,
       verified: false,
       active: false,
@@ -140,14 +174,53 @@ module.exports = async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message })
 
+    // If contact_email was provided, also create the auth user, upsert
+    // their profile, link organization_members, and send our branded
+    // welcome email with the set-password link. Soft-fail: if any of
+    // these steps errors, the supplier row stays and the admin can use
+    // the Users tab to recover.
+    let inviteSent = false
+    let userId = null
+    if (contact_email?.trim()) {
+      try {
+        const r = await createUserWithBrandedInvite({
+          email: contact_email, role: 'supplier', companyName: name
+        })
+        userId = r.userId
+        if (userId) {
+          await supabaseAdmin.from('profiles').upsert({
+            id: userId, email: contact_email.trim().toLowerCase(),
+            role: 'supplier', status: 'approved'
+          }).catch(e => console.warn('[create-supplier] profile upsert:', e.message))
+          await supabaseAdmin.from('organization_members').insert({
+            user_id: userId, supplier_id: data.id
+          }).catch(e => console.warn('[create-supplier] org_members insert:', e.message))
+        }
+        if (r.link) {
+          const tpl = welcomeInviteEmail({
+            companyName: name, contactEmail: contact_email,
+            role: 'supplier', inviteLink: r.link
+          })
+          const sendRes = await sendEmail({ to: contact_email, ...tpl })
+          inviteSent = sendRes?.ok === true
+        }
+      } catch (e) {
+        console.warn('[create-supplier] invite flow failed:', e.message)
+      }
+    }
+
     await supabaseAdmin.from('admin_actions').insert({
       admin_id: auth.user.id,
       action_type: 'create_supplier',
       target_id: data.id,
-      notes: `Created supplier: ${name}`
+      notes: `Created supplier: ${name}${inviteSent ? ` · invited ${contact_email}` : ''}`
     })
 
-    return res.status(201).json({ id: data.id, message: `${name} created successfully` })
+    return res.status(201).json({
+      id: data.id,
+      message: `${name} created${inviteSent ? ' · welcome email sent' : ''}`,
+      inviteSent
+    })
   }
 
   res.status(405).json({ error: 'Method not allowed' })
