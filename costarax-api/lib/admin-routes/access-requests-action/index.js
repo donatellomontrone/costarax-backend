@@ -5,17 +5,39 @@ const { sendEmail, accessApprovedEmail, welcomeInviteEmail } = require('../../em
 // triggering Supabase's default invite email. Returns { userId, link }.
 // Falls back gracefully if any step fails — the caller decides whether
 // to revert the access_request claim.
+//
+// Each Supabase Auth call has a single retry on transient 5xx / network
+// errors, with 600ms backoff. createUser duplicate errors are NOT
+// retried (they're terminal-meaningful).
+const _retryTransient = async (fn, label) => {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return await fn() }
+    catch (e) {
+      const status = e?.status || e?.code || 0
+      const transient = !status || status >= 500 || /network|timeout|fetch failed/i.test(e?.message || '')
+      if (!transient || attempt > 0) throw e
+      console.warn(`[${label}] transient error, retrying once:`, e?.message)
+      await new Promise(r => setTimeout(r, 600))
+    }
+  }
+}
 async function createUserWithBrandedInvite({ email, role, companyName }) {
   const lower = String(email || '').trim().toLowerCase()
   if (!lower) throw new Error('Email is required')
 
   // 1) Create auth user. email_confirm: true skips Supabase's "confirm
   //    your email" verification mail — we trust admin's approval.
-  const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
-    email: lower,
-    email_confirm: true,
-    user_metadata: { role, company: companyName || null }
-  })
+  let created = null, createErr = null
+  try {
+    const r = await _retryTransient(() => supabaseAdmin.auth.admin.createUser({
+      email: lower,
+      email_confirm: true,
+      user_metadata: { role, company: companyName || null }
+    }), 'createUser')
+    created = r?.data || null
+    createErr = r?.error || null
+  } catch (e) { createErr = e }
+
   if (createErr) {
     // If the user already exists (e.g. a previous failed approval), look
     // them up and continue with a recovery link instead.
@@ -25,8 +47,7 @@ async function createUserWithBrandedInvite({ email, role, companyName }) {
   let userId = created?.user?.id || null
   if (!userId) {
     // Recover existing user id by listing — Supabase doesn't expose a
-    // getUserByEmail admin helper, so we paginate. Tier 1 cap should be
-    // < 1000 users for a long time.
+    // getUserByEmail admin helper, so we paginate.
     const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 })
     const match = (list?.users || []).find(u => (u.email || '').toLowerCase() === lower)
     userId = match?.id || null
@@ -35,13 +56,13 @@ async function createUserWithBrandedInvite({ email, role, companyName }) {
 
   // 2) Generate a recovery link (used as both "set initial password" and
   //    "reset password" — the destination panel on login.html is the same).
-  const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+  const linkResp = await _retryTransient(() => supabaseAdmin.auth.admin.generateLink({
     type: 'recovery',
     email: lower,
     options: { redirectTo: 'https://costarax.com/login.html' }
-  })
-  if (linkErr) throw new Error(`generateLink failed: ${linkErr.message}`)
-  let link = linkData?.properties?.action_link || linkData?.action_link || null
+  }), 'generateLink')
+  if (linkResp?.error) throw new Error(`generateLink failed: ${linkResp.error.message}`)
+  let link = linkResp?.data?.properties?.action_link || linkResp?.data?.action_link || null
   if (link) {
     try {
       const u = new URL(link)

@@ -41,9 +41,16 @@ module.exports = async (req, res) => {
 
     if (insertErr) {
       if (insertErr.code === '23505') {
-        // Already exists — find existing id to allow document re-upload
+        // Already exists — find existing id to allow document re-upload.
+        // Use maybeSingle() + order to be safe against duplicate rows
+        // (.single() would throw if somehow two rows share the email).
         const { data: existing } = await supabaseAdmin
-          .from('access_requests').select('id').eq('contact_email', contact_email).single()
+          .from('access_requests')
+          .select('id')
+          .eq('contact_email', contact_email)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
         if (existing?.id) {
           return res.status(200).json({ id: existing.id, message: 'Request already submitted — documents will be added to your existing request.' })
         }
