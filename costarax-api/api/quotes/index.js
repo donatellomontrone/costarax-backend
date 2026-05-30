@@ -48,9 +48,12 @@ module.exports = async (req, res) => {
         .eq('supplier_id', org.supplier_id).order('created_at', { ascending: false }))
 
     } else {
-      // Admin — see all quotes, then enrich with names
+      // Admin — see all quotes, then enrich with names. Include message,
+      // reply, replied_at and total_amount_php so the admin "All Quotes"
+      // detail modal can render the buyer/supplier conversation and order
+      // total without a second round-trip.
       ;({ data, error } = await supabaseAdmin.from('quote_requests')
-        .select('id,buyer_business_id,supplier_id,products_summary,status,created_at')
+        .select('id,buyer_business_id,supplier_id,products_summary,message,reply,replied_at,status,total_amount_php,created_at')
         .order('created_at', { ascending: false }).limit(100))
       if (data?.length) {
         const bizIds = [...new Set(data.map(q => q.buyer_business_id).filter(Boolean))]

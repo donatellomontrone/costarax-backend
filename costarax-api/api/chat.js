@@ -15,7 +15,7 @@ Key facts:
 - Access is by application only — every business is verified against a valid BIR/TIN registration — approval within 24h
 - Free for buying businesses. Suppliers contact the team to join.
 - Prices in Philippine Peso (₱). Platform in English, Filipino (Tagalog), and Chinese.
-- Live at: costarax.vercel.app
+- Live at: costarax.com
 
 How it works for buyers:
 1. Apply for access (fill the form on this page)

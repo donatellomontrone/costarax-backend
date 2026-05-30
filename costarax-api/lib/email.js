@@ -281,11 +281,16 @@ function welcomeInviteEmail({ companyName, contactEmail, role, inviteLink }) {
                   : role === 'supplier' ? 'Supplier'
                   : 'Business buyer'
   const helloName = companyName ? `, ${companyName}` : ''
-  const body = `
+  // If the magic invite link couldn't be generated (Supabase rate limit,
+  // SMTP race, etc.), the email still goes out but with a "use Forgot
+  // password" CTA so the user has a clear path forward instead of
+  // landing on the bare login screen with no password set.
+  const hasLink = !!inviteLink
+  const body = hasLink ? `
     ${h2(`Welcome to Costarax${helloName}!`)}
     ${p(`Your ${roleLabel.toLowerCase()} account has been approved and is ready to use.`)}
     ${p('Click the button below to <strong>set your password</strong> and sign in for the first time. The link is valid for 24 hours.')}
-    ${btn(inviteLink || `${APP_URL}/login.html`, 'Set my password')}
+    ${btn(inviteLink, 'Set my password')}
     ${table(
       row('Login email:', contactEmail || '—'),
       row('Account type:', roleLabel),
@@ -293,8 +298,22 @@ function welcomeInviteEmail({ companyName, contactEmail, role, inviteLink }) {
     )}
     ${highlight(`<strong>Tip:</strong> bookmark <a href="${APP_URL}/login.html" style="color:#123F28;font-weight:700">costarax.com/login.html</a> so you can log in any time from any device.`)}
     ${p('<span style="font-size:12px;color:#7A7870;">If you didn\'t expect this email, you can safely ignore it. No account was created without administrator approval.</span>')}
+  ` : `
+    ${h2(`Welcome to Costarax${helloName}!`)}
+    ${p(`Your ${roleLabel.toLowerCase()} account has been approved.`)}
+    ${highlight('We could not generate your one-time set-password link this time. To finish setting up your account, please go to the login page and use <strong>"Forgot password?"</strong> to receive a fresh link.')}
+    ${btn(`${APP_URL}/login.html`, 'Go to login')}
+    ${table(
+      row('Login email:', contactEmail || '—'),
+      row('Account type:', roleLabel),
+    )}
+    ${p('<span style="font-size:12px;color:#7A7870;">If you have any trouble, reply to this email and we\'ll get you in.</span>')}
   `
-  return { subject: `Welcome to Costarax — set your password to sign in`, html: layout('Welcome — Costarax', body) }
+  return {
+    subject: hasLink ? `Welcome to Costarax — set your password to sign in`
+                     : `Welcome to Costarax — finish setting up your account`,
+    html: layout('Welcome — Costarax', body)
+  }
 }
 
 function passwordResetEmail({ contactEmail, resetLink }) {
