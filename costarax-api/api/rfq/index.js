@@ -113,6 +113,43 @@ module.exports = async (req, res) => {
     }
     if (error) return res.status(500).json({ error: error.message })
 
+    // Persist structured line items so the admin quote detail modal,
+    // the stock-decrement trigger and any future per-item supplier reply
+    // flow have something to read. Best-effort: if the migration hasn't
+    // been applied yet (table missing), swallow the error — products_summary
+    // continues to work as the human-readable fallback.
+    try {
+      const itemsToInsert = []
+      ;(inserted || []).forEach(q => {
+        const bucket = isBasket ? (items_by_supplier[q.supplier_id] || {}) : null
+        const bucketItems = bucket?.items || (Array.isArray(req.body?.items) ? req.body.items : [])
+        bucketItems.forEach(it => {
+          if (!it) return
+          const productId = it.product_id || it.productId || null
+          const productName = String(it.product_name || it.canonical || it.desc || '').slice(0, 200).trim()
+          if (!productName) return
+          const qty = Number(it.qty || it.quantity)
+          const unit = String(it.unit || '').slice(0, 32).trim() || null
+          itemsToInsert.push({
+            quote_request_id: q.id,
+            product_id: productId,
+            product_name: productName,
+            quantity: Number.isFinite(qty) ? qty : null,
+            unit,
+            price_php: null,
+          })
+        })
+      })
+      if (itemsToInsert.length > 0) {
+        const { error: qiErr } = await supabaseAdmin.from('quote_items').insert(itemsToInsert)
+        if (qiErr && !/does not exist|relation/i.test(qiErr.message || '')) {
+          console.warn('[rfq] quote_items insert non-fatal error:', qiErr.message)
+        }
+      }
+    } catch (qiSoft) {
+      console.warn('[rfq] quote_items insert threw (non-fatal):', qiSoft?.message)
+    }
+
     // Fire-and-forget email notifications to each supplier — in basket mode
     // each supplier gets THEIR specific message, in same mode they all share one.
     if (isBasket) {
