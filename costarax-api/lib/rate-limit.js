@@ -18,9 +18,12 @@ function clientIp(req) {
   return req.socket?.remoteAddress || 'unknown'
 }
 
-// limit(req, { bucket, identifier, max, windowSec })
+// limit(req, { bucket, identifier, max, windowSec, failClosed })
 // Returns { allowed, remaining, retryAfter }.
-async function limit(req, { bucket, identifier, max, windowSec }) {
+// failClosed: when the counter query errors, deny instead of allow. Use this on
+// costly endpoints (e.g. AI calls that hit a paid API) so a broken/missing
+// rate_limits table can't turn into unbounded spend. Defaults to fail-open.
+async function limit(req, { bucket, identifier, max, windowSec, failClosed = false }) {
   const id = String(identifier || clientIp(req)).slice(0, 200)
   const since = new Date(Date.now() - windowSec * 1000).toISOString()
 
@@ -31,9 +34,12 @@ async function limit(req, { bucket, identifier, max, windowSec }) {
     .eq('identifier', id)
     .gte('created_at', since)
 
-  // Fail open if the table doesn't exist or the query errors — log so we know.
+  // On query error (table missing / DB hiccup): fail-closed denies, fail-open allows.
   if (error) {
-    console.error('[rate-limit] query error', error.message)
+    console.error('[rate-limit] query error', error.message, failClosed ? '(failing closed)' : '(failing open)')
+    if (failClosed) {
+      return { allowed: false, remaining: 0, retryAfter: windowSec }
+    }
     return { allowed: true, remaining: max, retryAfter: 0 }
   }
 

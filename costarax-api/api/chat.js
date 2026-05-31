@@ -324,7 +324,7 @@ module.exports = async (req, res) => {
 
   // ── Stateless landing-page Q&A (existing behaviour) ──
   // Rate limit: 20 messages / hour per IP (chat is public + costs money per call).
-  if (!(await enforce(req, res, { bucket: 'chat', identifier: clientIp(req), max: 20, windowSec: 3600 }))) return;
+  if (!(await enforce(req, res, { bucket: 'chat', identifier: clientIp(req), max: 20, windowSec: 3600, failClosed: true }))) return;
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(200).json({ reply: "Hi! I'm the Costarax assistant. Our AI support is being set up — in the meantime, fill the access request form on this page and our team will get back to you within 24h." });
