@@ -12,7 +12,7 @@ async function getCallerQuoteAccess(auth, quoteId) {
 
   if (role === 'buyer' || role === 'business') {
     const { data: biz } = await supabaseAdmin
-      .from('businesses').select('id').eq('contact_email', auth.user.email).single()
+      .from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
     let bid = biz?.id
     if (!bid) {
       const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)

@@ -207,11 +207,11 @@ async function handleSupportMode(req, res, body) {
     const chatId = Number(body.chat_id);
     if (!chatId) return res.status(400).json({ error: 'chat_id required' });
     const { data: chat } = await supabaseAdmin
-      .from('support_chats').select('id, status, assigned_admin').eq('id', chatId).single();
+      .from('support_chats').select('id, status, assigned_admin').eq('id', chatId).maybeSingle();
     if (!chat) return res.status(404).json({ error: 'Chat not found' });
     // Only owner or admin can read.
     const { data: ownerCheck } = await supabaseAdmin
-      .from('support_chats').select('user_id').eq('id', chatId).single();
+      .from('support_chats').select('user_id').eq('id', chatId).maybeSingle();
     if (ownerCheck?.user_id !== user.id && !isAdmin) return res.status(403).json({ error: 'Forbidden' });
     const { data: msgs } = await supabaseAdmin
       .from('support_messages').select('id, sender, body, created_at')
@@ -225,7 +225,7 @@ async function handleSupportMode(req, res, body) {
     if (!chatId || !text) return res.status(400).json({ error: 'chat_id and text required' });
 
     const { data: chat } = await supabaseAdmin
-      .from('support_chats').select('id, user_id, status').eq('id', chatId).single();
+      .from('support_chats').select('id, user_id, status').eq('id', chatId).maybeSingle();
     if (!chat) return res.status(404).json({ error: 'Chat not found' });
     if (chat.user_id !== user.id) return res.status(403).json({ error: 'Forbidden' });
     if (chat.status === 'closed') return res.status(400).json({ error: 'Chat is closed' });
@@ -292,7 +292,7 @@ async function handleSupportMode(req, res, body) {
     const chatId = Number(body.chat_id);
     if (!chatId) return res.status(400).json({ error: 'chat_id required' });
     const { data: chat } = await supabaseAdmin
-      .from('support_chats').select('user_id').eq('id', chatId).single();
+      .from('support_chats').select('user_id').eq('id', chatId).maybeSingle();
     if (chat?.user_id !== user.id && !isAdmin) return res.status(403).json({ error: 'Forbidden' });
     await supabaseAdmin.from('support_chats').update({ status: 'closed' }).eq('id', chatId);
     return res.status(200).json({ ok: true });

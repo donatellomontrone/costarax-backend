@@ -2,7 +2,10 @@
 -- NOTE: this table already exists in production with the schema below.
 -- Running this migration on a fresh DB will create it correctly.
 
-create type if not exists sender_role_enum as enum ('buyer', 'supplier', 'admin');
+DO $$ BEGIN
+  CREATE TYPE sender_role_enum AS ENUM ('buyer','supplier','admin');
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 create table if not exists quote_messages (
   id                uuid        primary key default gen_random_uuid(),

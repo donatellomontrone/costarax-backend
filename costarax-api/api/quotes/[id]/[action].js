@@ -16,7 +16,7 @@ module.exports = async (req, res) => {
   // ── CANCEL / DECLINE ──────────────────────────────────────────────────────
   if (action === 'cancel') {
     const { data: quote } = await supabaseAdmin
-      .from('quote_requests').select('buyer_business_id, supplier_id, status').eq('id', id).single()
+      .from('quote_requests').select('buyer_business_id, supplier_id, status').eq('id', id).maybeSingle()
     if (!quote) return res.status(404).json({ error: 'Quote not found' })
 
     if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
@@ -46,7 +46,7 @@ module.exports = async (req, res) => {
     if (!reply?.trim()) return res.status(400).json({ error: 'Reply text is required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
-      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
 
     const { error } = await supabaseAdmin.from('quote_requests').update({
@@ -70,7 +70,7 @@ module.exports = async (req, res) => {
     const { order_notes, total_amount_php } = req.body || {}
 
     const { data: quote, error: qErr } = await supabaseAdmin
-      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'replied') return res.status(400).json({ error: 'Quote must be in replied status to confirm' })
 
@@ -141,7 +141,7 @@ module.exports = async (req, res) => {
     if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
-      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'confirmed') return res.status(400).json({ error: 'Quote must be confirmed before marking fulfilled' })
 
@@ -177,7 +177,7 @@ module.exports = async (req, res) => {
     if (!dr || dr < 1 || dr > 5) return res.status(400).json({ error: 'Delivery rating must be between 1 and 5' })
 
     const { data: quote } = await supabaseAdmin
-      .from('quote_requests').select('buyer_business_id, supplier_id, status').eq('id', id).single()
+      .from('quote_requests').select('buyer_business_id, supplier_id, status').eq('id', id).maybeSingle()
     if (!quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'fulfilled') return res.status(400).json({ error: 'Order must be fulfilled to leave a review' })
 
@@ -211,7 +211,7 @@ module.exports = async (req, res) => {
     if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
-      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'confirmed') return res.status(400).json({ error: 'Quote must be confirmed before marking as preparing' })
 
@@ -240,7 +240,7 @@ module.exports = async (req, res) => {
     if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
-      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'preparing') return res.status(400).json({ error: 'Quote must be in preparing status to dispatch' })
 
@@ -270,7 +270,7 @@ module.exports = async (req, res) => {
     if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
-      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).single()
+      .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'dispatched') return res.status(400).json({ error: 'Order must be dispatched before confirming delivery' })
 
@@ -313,7 +313,7 @@ module.exports = async (req, res) => {
 
     if (auth.profile.role !== 'admin') {
       const { data: quote } = await supabaseAdmin
-        .from('quote_requests').select('buyer_business_id').eq('id', id).single()
+        .from('quote_requests').select('buyer_business_id').eq('id', id).maybeSingle()
       if (!quote) return res.status(404).json({ error: 'Quote not found' })
       let buyerBusinessId = null
       const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()

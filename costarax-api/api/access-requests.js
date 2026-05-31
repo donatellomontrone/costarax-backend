@@ -66,7 +66,7 @@ module.exports = async (req, res) => {
       .eq('contact_email', contact_email)
       .order('created_at', { ascending: false })
       .limit(1)
-      .single()
+      .maybeSingle()
 
     // Notify admin
     const adminEmail = process.env.ADMIN_EMAIL || 'hello@costarax.com'

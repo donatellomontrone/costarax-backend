@@ -54,13 +54,15 @@ BEGIN
     RETURN NEW;
   END IF;
 
+  -- NOTE: the previous `sp.unit = qi.unit` predicate was dropped because units
+  -- are free-text and almost never matched, so stock never decremented. Quantity
+  -- is subtracted as numeric (no ::int cast) to preserve fractional amounts.
   UPDATE public.supplier_prices sp
-    SET stock_qty = GREATEST(0, COALESCE(sp.stock_qty, 0) - COALESCE(qi.quantity, 0)::int)
+    SET stock_qty = GREATEST(0, COALESCE(sp.stock_qty, 0) - COALESCE(qi.quantity, 0))
     FROM public.quote_items qi
     WHERE qi.quote_request_id = NEW.id
       AND qi.product_id      = sp.product_id
       AND sp.supplier_id     = NEW.supplier_id
-      AND sp.unit            = qi.unit
       AND sp.stock_qty IS NOT NULL;
 
   RETURN NEW;

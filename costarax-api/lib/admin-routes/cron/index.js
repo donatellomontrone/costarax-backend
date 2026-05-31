@@ -169,10 +169,10 @@ module.exports = async (req, res) => {
         .in('product_id', productIds)
         .eq('active', true)
 
-      // Best price 7 days ago from price_history
+      // Best price 7 days ago from supplier_price_history
       const { data: histPrices } = await supabaseAdmin
-        .from('price_history')
-        .select('product_id, price_php, unit, recorded_at')
+        .from('supplier_price_history')
+        .select('product_id, price_php, recorded_at')
         .in('product_id', productIds)
         .lt('recorded_at', sevenDaysAgo)
         .order('recorded_at', { ascending: false })
@@ -196,7 +196,7 @@ module.exports = async (req, res) => {
       // Best historical price per product (most recent before 7d cutoff)
       const bestHist = {}
       ;(histPrices || []).forEach(r => {
-        if (!bestHist[r.product_id]) bestHist[r.product_id] = { price: r.price_php, unit: r.unit }
+        if (!bestHist[r.product_id]) bestHist[r.product_id] = { price: r.price_php }
       })
 
       // Group watchlist by business_id

@@ -1,6 +1,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { verifyToken } = require('../lib/supabase-admin');
 const { applyCors } = require('../lib/cors');
+const { enforce, clientIp } = require('../lib/rate-limit');
 
 module.exports = async (req, res) => {
   if (applyCors(req, res, { methods: 'POST,OPTIONS' })) return;
@@ -9,6 +10,9 @@ module.exports = async (req, res) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
   const user = await verifyToken(token);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  // Rate limit: 30 AI recommendations / hour per user (each call hits Anthropic).
+  if (!(await enforce(req, res, { bucket: 'ai-recommend', identifier: user.id || clientIp(req), max: 30, windowSec: 3600 }))) return;
 
   const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
   const { product, options, qty } = body;

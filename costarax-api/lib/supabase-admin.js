@@ -14,7 +14,7 @@ async function verifyToken(token) {
 }
  
 async function getProfile(userId) {
-  const { data } = await supabaseAdmin.from('profiles').select('role,status').eq('id', userId).single()
+  const { data } = await supabaseAdmin.from('profiles').select('role,status').eq('id', userId).maybeSingle()
   return data
 }
  

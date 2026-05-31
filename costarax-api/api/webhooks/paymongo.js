@@ -11,13 +11,23 @@ async function getRawBody(req) {
   })
 }
 
+// Length-safe constant-time hex compare. Returns false unless both inputs are
+// non-empty, equal-length hex strings (timingSafeEqual throws on length mismatch).
+function safeEq(aHex, bHex) {
+  if (!aHex || !bHex || aHex.length !== bHex.length) return false
+  try {
+    return crypto.timingSafeEqual(Buffer.from(aHex), Buffer.from(bHex))
+  } catch { return false }
+}
+
 function verifySignature(rawBody, signature, secret) {
   try {
     const parts = {}
     signature.split(',').forEach(p => { const [k, v] = p.split('='); parts[k] = v })
     const toSign = `${parts.t}.${rawBody}`
     const expected = crypto.createHmac('sha256', secret).update(toSign).digest('hex')
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts.te || ''))
+    // Header carries both test (te) and live (li) HMACs; accept whichever matches.
+    return safeEq(expected, parts.te) || safeEq(expected, parts.li)
   } catch { return false }
 }
 
@@ -50,7 +60,7 @@ module.exports = async (req, res) => {
 
   // Idempotency check
   const { data: existing } = await supabaseAdmin
-    .from('payment_events').select('id').eq('provider', 'paymongo').eq('provider_event_id', eventId).single()
+    .from('payment_events').select('id').eq('provider', 'paymongo').eq('provider_event_id', eventId).maybeSingle()
   if (existing) return res.status(200).json({ message: 'Already processed' })
 
   await supabaseAdmin.from('payment_events').insert({
@@ -68,7 +78,7 @@ module.exports = async (req, res) => {
       .from('subscriptions')
       .select('supplier_id, suppliers(name)')
       .eq('provider_checkout_session_id', sessionId)
-      .single()
+      .maybeSingle()
 
     if (sub?.supplier_id) {
       // Activate supplier
@@ -115,7 +125,7 @@ module.exports = async (req, res) => {
     const subscriptionId = attrs.id
     if (subscriptionId) {
       const { data: sub } = await supabaseAdmin
-        .from('subscriptions').select('supplier_id').eq('provider_subscription_id', subscriptionId).single()
+        .from('subscriptions').select('supplier_id').eq('provider_subscription_id', subscriptionId).maybeSingle()
       if (sub?.supplier_id) {
         await supabaseAdmin.from('suppliers').update({ active: false }).eq('id', sub.supplier_id)
         await supabaseAdmin.from('subscriptions').update({

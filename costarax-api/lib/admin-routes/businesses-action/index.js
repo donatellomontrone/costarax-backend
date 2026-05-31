@@ -42,7 +42,7 @@ module.exports = async (req, res) => {
 
   // ── APPROVE ───────────────────────────────────────────────────────────────
   if (action === 'approve') {
-    const { data: biz } = await supabaseAdmin.from('businesses').select('name,contact_email,status').eq('id', id).single()
+    const { data: biz } = await supabaseAdmin.from('businesses').select('name,contact_email,status').eq('id', id).maybeSingle()
     if (!biz) return res.status(404).json({ error: 'Business not found' })
     if (biz.status === 'approved') return res.status(400).json({ error: 'Already approved' })
 
@@ -101,7 +101,7 @@ module.exports = async (req, res) => {
 
   // ── REJECT ────────────────────────────────────────────────────────────────
   if (action === 'reject') {
-    const { data: biz } = await supabaseAdmin.from('businesses').select('name').eq('id', id).single()
+    const { data: biz } = await supabaseAdmin.from('businesses').select('name').eq('id', id).maybeSingle()
     if (!biz) return res.status(404).json({ error: 'Business not found' })
 
     const { error } = await supabaseAdmin.from('businesses').update({ status: 'rejected' }).eq('id', id)
