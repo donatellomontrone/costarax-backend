@@ -1052,16 +1052,19 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           dx.price_rows_after_collapse = dedupedPriceRows2.length
           dx.price_rows_lost_in_collapse = priceRows2.length - dedupedPriceRows2.length
           if (dedupedPriceRows2.length && supplierId) {
-            // Full-replace semantics: every upload wipes the supplier's
-            // current price list before inserting the new one. Previously
-            // we only deleted prices for product_ids in the new payload,
-            // which left orphan rows from earlier uploads — the supplier's
-            // catalog grew with every retry instead of being replaced.
+            // Merge semantics: replace only the prices for products present in
+            // THIS upload, leaving the supplier's other products (from earlier
+            // uploads) intact. Deleting just the incoming product_ids replaces a
+            // re-uploaded product's price cleanly — no duplicate-on-retry, which
+            // is what the old full-wipe was guarding against — without silently
+            // removing products a buyer could otherwise still find in search.
+            const incomingIds2 = [...new Set(dedupedPriceRows2.map(r => r.product_id))]
             const { error: deleteErr } = await supabaseAdmin
               .from('supplier_prices')
               .delete()
               .eq('supplier_id', supplierId)
-            dx.full_replace_delete_error = deleteErr?.message || null
+              .in('product_id', incomingIds2)
+            dx.merge_delete_error = deleteErr?.message || null
             if (deleteErr) {
               persistErr = 'Could not clear existing supplier prices: ' + deleteErr.message
             } else {
@@ -1440,12 +1443,17 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
 
   const dedupedPriceRows = collapsePriceRows(priceRows)
   if (dedupedPriceRows.length && supplierId) {
-    // Full-replace: wipe the supplier's existing price list before insert
-    // so orphan rows from previous uploads don't accumulate.
+    // Merge semantics: replace only the prices for products present in THIS
+    // upload, leaving the supplier's other products (from earlier uploads)
+    // intact. A full wipe used to silently delete products a buyer could still
+    // find; scoping the delete to the incoming product_ids also prevents the
+    // duplicate-on-retry growth the old full-replace was guarding against.
+    const incomingIds = [...new Set(dedupedPriceRows.map(r => r.product_id))]
     const { error: deleteErr } = await supabaseAdmin
       .from('supplier_prices')
       .delete()
       .eq('supplier_id', supplierId)
+      .in('product_id', incomingIds)
     if (deleteErr) {
       upsertError = 'Could not clear existing supplier prices: ' + deleteErr.message
     } else {
