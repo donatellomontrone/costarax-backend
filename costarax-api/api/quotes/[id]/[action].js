@@ -49,6 +49,14 @@ module.exports = async (req, res) => {
       .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
 
+    // Ownership: a supplier may only reply to quotes addressed to their own
+    // supplier account. Without this any logged-in supplier could overwrite a
+    // competitor's reply and email that buyer. Admins bypass the check.
+    if (auth.profile.role !== 'admin') {
+      const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
+      if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
+    }
+
     const { error } = await supabaseAdmin.from('quote_requests').update({
       reply: reply.trim(), status: 'replied', replied_at: new Date().toISOString()
     }).eq('id', id)
