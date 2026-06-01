@@ -409,8 +409,23 @@ async function handlePriceList(req, res) {
     return res.status(403).json({ error: 'No supplier linked to this account' })
   }
   if (supplierId) {
-    const { data: sup } = await supabaseAdmin.from('suppliers').select('name').eq('id', supplierId).single()
+    const { data: sup } = await supabaseAdmin.from('suppliers').select('name, subscription_plan').eq('id', supplierId).single()
     if (sup?.name) supplierName = sup.name
+    // Basic-plan catalog cap: 100 indexed products. Once a Basic supplier is at
+    // the cap, block further growth (price updates to existing products still
+    // flow through the Products tab). Pro/Corporate are uncapped. The frontend
+    // pre-checks the resulting size; this is the server-side safety net.
+    if (auth.profile.role !== 'admin' && String(sup?.subscription_plan || 'basic').toLowerCase() === 'basic') {
+      const { data: existingPr } = await supabaseAdmin
+        .from('supplier_prices').select('product_id').eq('supplier_id', supplierId).eq('active', true)
+      const distinctProducts = new Set((existingPr || []).map(r => r.product_id)).size
+      if (distinctProducts >= 100) {
+        return res.status(403).json({
+          error: 'Basic plan is limited to 100 products. Upgrade to Pro for unlimited products — you can still update existing prices from the Products tab.',
+          code: 'PLAN_PRODUCT_CAP', plan: 'basic', limit: 100, current: distinctProducts
+        })
+      }
+    }
   }
 
   const { data: uploadRecord } = await supabaseAdmin
