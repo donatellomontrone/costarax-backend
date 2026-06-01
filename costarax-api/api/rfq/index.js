@@ -12,7 +12,7 @@ module.exports = async (req, res) => {
     const auth = await requireAuth(req, res)
     if (!auth) return
 
-    const { supplier_ids, products_summary, message, weekly_volume, items_by_supplier } = req.body || {}
+    const { supplier_ids, products_summary, message, weekly_volume, items_by_supplier, idempotency_key } = req.body || {}
 
     // Determine mode: "same" (supplier_ids + message) or "basket" (items_by_supplier dict)
     const isBasket = items_by_supplier && typeof items_by_supplier === 'object' && !Array.isArray(items_by_supplier)
@@ -50,6 +50,26 @@ module.exports = async (req, res) => {
     }
     if (!buyerBusinessId) return res.status(400).json({ error: 'No business associated with this account' })
 
+    // Idempotency: the client sends a stable idempotency_key (reused across
+    // retries). If rows for this key + buyer already exist, the earlier submit
+    // succeeded — replay that result instead of inserting duplicate RFQs.
+    // rfq_group_id doubles as the key; on DBs without that column the lookup
+    // errors and we fall through to a normal insert.
+    if (idempotency_key) {
+      const { data: existing, error: exErr } = await supabaseAdmin
+        .from('quote_requests').select('id')
+        .eq('rfq_group_id', idempotency_key)
+        .eq('buyer_business_id', buyerBusinessId)
+      if (!exErr && existing && existing.length) {
+        return res.status(200).json({
+          rfq_group_id: idempotency_key,
+          sent_to: existing.length,
+          replayed: true,
+          message: `RFQ already sent to ${existing.length} supplier${existing.length !== 1 ? 's' : ''}`
+        })
+      }
+    }
+
     // Dedupe supplier ids and verify they all exist + are active
     const uniqueSupIds = [...new Set(effectiveSupIds.filter(Boolean))]
     const { data: validSuppliers } = await supabaseAdmin
@@ -58,7 +78,7 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'No active suppliers found among the provided IDs' })
     }
 
-    const rfqGroupId = crypto.randomUUID()
+    const rfqGroupId = idempotency_key || crypto.randomUUID()
     const rows = validSuppliers.map(s => {
       if (isBasket) {
         const bucket = items_by_supplier[s.id] || {}
