@@ -38,7 +38,7 @@ module.exports = async (req, res) => {
     // Resolve buyer business id (same logic as POST /api/quotes)
     let buyerBusinessId = null, buyerName = null
     const { data: biz } = await supabaseAdmin
-      .from('businesses').select('id,name').eq('contact_email', auth.user.email).maybeSingle()
+      .from('businesses').select('id,name').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
     if (biz) { buyerBusinessId = biz.id; buyerName = biz.name }
     else {
       const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)

@@ -30,7 +30,7 @@ module.exports = async (req, res) => {
 
     if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
       const { data: biz } = await supabaseAdmin
-        .from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
+        .from('businesses').select('id').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
 
       if (!biz) {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
@@ -84,7 +84,7 @@ module.exports = async (req, res) => {
     let buyerName = null
 
     const { data: biz } = await supabaseAdmin
-      .from('businesses').select('id,name').eq('contact_email', auth.user.email).maybeSingle()
+      .from('businesses').select('id,name').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
 
     if (biz) {
       buyerBusinessId = biz.id
@@ -99,6 +99,14 @@ module.exports = async (req, res) => {
     }
 
     if (!buyerBusinessId) return res.status(400).json({ error: 'No business associated with this account' })
+
+    // Validate the target supplier exists and is approved + active. Without
+    // this a buyer could file a quote against an unapproved/inactive (or
+    // non-existent) supplier by posting a raw supplier_id — rfq/index.js
+    // applies the same active+approved gate.
+    const { data: validSupplier } = await supabaseAdmin
+      .from('suppliers').select('id').eq('id', supplier_id).eq('active', true).eq('status', 'approved').maybeSingle()
+    if (!validSupplier) return res.status(400).json({ error: 'Supplier not found or not available' })
 
     const { data: quote, error } = await supabaseAdmin.from('quote_requests').insert({
       buyer_business_id: buyerBusinessId, supplier_id, requested_by: auth.user.id,

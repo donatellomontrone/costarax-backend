@@ -4,7 +4,7 @@ const { resolveBusinessMembership, resolveSupplierMembership } = require('../../
 
 async function getCallerQuoteAccess(auth, quoteId) {
   const { data: quote } = await supabaseAdmin
-    .from('quote_requests').select('buyer_business_id,supplier_id').eq('id', quoteId).single()
+    .from('quote_requests').select('buyer_business_id,supplier_id').eq('id', quoteId).maybeSingle()
   if (!quote) return { quote: null, allowed: false }
 
   const role = auth.profile.role
@@ -12,7 +12,7 @@ async function getCallerQuoteAccess(auth, quoteId) {
 
   if (role === 'buyer' || role === 'business') {
     const { data: biz } = await supabaseAdmin
-      .from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
+      .from('businesses').select('id').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
     let bid = biz?.id
     if (!bid) {
       const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)

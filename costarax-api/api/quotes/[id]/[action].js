@@ -22,7 +22,7 @@ module.exports = async (req, res) => {
     if (auth.profile.role === 'buyer' || auth.profile.role === 'business') {
       let buyerBusinessId = null
       const { data: biz } = await supabaseAdmin
-        .from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
+        .from('businesses').select('id').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
         buyerBusinessId = org?.business_id || null
@@ -40,7 +40,7 @@ module.exports = async (req, res) => {
 
   // ── REPLY ─────────────────────────────────────────────────────────────────
   if (action === 'reply') {
-    if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
+    if (!['supplier', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
 
     const { reply } = req.body || {}
     if (!reply?.trim()) return res.status(400).json({ error: 'Reply text is required' })
@@ -52,7 +52,7 @@ module.exports = async (req, res) => {
     // Ownership: a supplier may only reply to quotes addressed to their own
     // supplier account. Without this any logged-in supplier could overwrite a
     // competitor's reply and email that buyer. Admins bypass the check.
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
@@ -73,7 +73,7 @@ module.exports = async (req, res) => {
 
   // ── CONFIRM ───────────────────────────────────────────────────────────────
   if (action === 'confirm') {
-    if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
+    if (!['buyer', 'business', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
 
     const { order_notes, total_amount_php } = req.body || {}
 
@@ -82,9 +82,9 @@ module.exports = async (req, res) => {
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'replied') return res.status(400).json({ error: 'Quote must be in replied status to confirm' })
 
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
         buyerBusinessId = org?.business_id || null
@@ -95,15 +95,22 @@ module.exports = async (req, res) => {
     const totalAmount = total_amount_php != null && !isNaN(Number(total_amount_php))
       ? Number(total_amount_php) : null
 
-    // Generate order number CX-YYYY-NNNN
+    // Generate order number CX-YYYY-NNNN — counter scoped to the current year
+    // so it resets each January (previously it kept climbing across years).
+    // order_number is a display label; the quote UUID is the real key, so the
+    // small residual race under simultaneous confirms only risks a cosmetic
+    // duplicate, never data corruption.
     let orderNumber = null
     try {
+      const year = new Date().getFullYear()
+      const yearStart = new Date(Date.UTC(year, 0, 1)).toISOString()
       const { count } = await supabaseAdmin
         .from('quote_requests')
         .select('*', { count: 'exact', head: true })
         .in('status', ['confirmed', 'fulfilled'])
+        .gte('confirmed_at', yearStart)
       const n = String((count || 0) + 1).padStart(4, '0')
-      orderNumber = `CX-${new Date().getFullYear()}-${n}`
+      orderNumber = `CX-${year}-${n}`
     } catch (_) {}
 
     // Defensive payload: drop columns if Postgres reports them missing so the
@@ -132,7 +139,7 @@ module.exports = async (req, res) => {
     try {
       const { data: supplierMember } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).limit(1).maybeSingle()
       if (supplierMember?.user_id) {
-        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).single()
+        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', supplierMember.user_id).maybeSingle()
         if (sp?.email) {
           const tpl = orderConfirmedEmail({ supplierName: quote.suppliers?.name, buyerName: quote.businesses?.name, orderNotes: order_notes?.trim() || null })
           await sendEmail({ to: sp.email, ...tpl })
@@ -146,14 +153,14 @@ module.exports = async (req, res) => {
 
   // ── FULFILL ───────────────────────────────────────────────────────────────
   if (action === 'fulfill') {
-    if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
+    if (!['supplier', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
       .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'confirmed') return res.status(400).json({ error: 'Quote must be confirmed before marking fulfilled' })
 
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
@@ -177,7 +184,7 @@ module.exports = async (req, res) => {
 
   // ── REVIEW ────────────────────────────────────────────────────────────────
   if (action === 'review') {
-    if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
+    if (!['buyer', 'business', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
 
     const { order_rating, delivery_rating, comment } = req.body || {}
     const or = parseInt(order_rating), dr = parseInt(delivery_rating)
@@ -189,9 +196,9 @@ module.exports = async (req, res) => {
     if (!quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'fulfilled') return res.status(400).json({ error: 'Order must be fulfilled to leave a review' })
 
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
         buyerBusinessId = org?.business_id || null
@@ -216,14 +223,14 @@ module.exports = async (req, res) => {
 
   // ── PREPARE ───────────────────────────────────────────────────────────────
   if (action === 'prepare') {
-    if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
+    if (!['supplier', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
       .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'confirmed') return res.status(400).json({ error: 'Quote must be confirmed before marking as preparing' })
 
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
@@ -245,14 +252,14 @@ module.exports = async (req, res) => {
 
   // ── DISPATCH ──────────────────────────────────────────────────────────────
   if (action === 'dispatch') {
-    if (!['supplier', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
+    if (!['supplier', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Supplier access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
       .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'preparing') return res.status(400).json({ error: 'Quote must be in preparing status to dispatch' })
 
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
       if (!org || org.supplier_id !== quote.supplier_id) return res.status(403).json({ error: 'Not authorized' })
     }
@@ -275,16 +282,16 @@ module.exports = async (req, res) => {
 
   // ── DELIVER ───────────────────────────────────────────────────────────────
   if (action === 'deliver') {
-    if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
+    if (!['buyer', 'business', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
 
     const { data: quote, error: qErr } = await supabaseAdmin
       .from('quote_requests').select('*,businesses(name,contact_email,contact_phone),suppliers(name,contact_phone)').eq('id', id).maybeSingle()
     if (qErr || !quote) return res.status(404).json({ error: 'Quote not found' })
     if (quote.status !== 'dispatched') return res.status(400).json({ error: 'Order must be dispatched before confirming delivery' })
 
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
         buyerBusinessId = org?.business_id || null
@@ -301,7 +308,7 @@ module.exports = async (req, res) => {
     try {
       const { data: member } = await supabaseAdmin.from('organization_members').select('user_id').eq('supplier_id', quote.supplier_id).limit(1).maybeSingle()
       if (member?.user_id) {
-        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', member.user_id).single()
+        const { data: sp } = await supabaseAdmin.from('profiles').select('email').eq('id', member.user_id).maybeSingle()
         if (sp?.email) {
           const tpl = orderDeliveredSupplierEmail({ buyerName: quote.businesses?.name, supplierName: quote.suppliers?.name })
           await sendEmail({ to: sp.email, ...tpl }).catch(e => console.log('Email error:', e.message))
@@ -313,18 +320,18 @@ module.exports = async (req, res) => {
 
   // ── RECURRING ─────────────────────────────────────────────────────────────
   if (action === 'recurring') {
-    if (!['buyer', 'business', 'admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
+    if (!['buyer', 'business', 'admin', 'super_admin'].includes(auth.profile.role)) return res.status(403).json({ error: 'Buyer access required' })
 
     const { freq } = req.body || {}
     const validFreqs = ['weekly', 'biweekly', 'monthly', null]
     if (!validFreqs.includes(freq)) return res.status(400).json({ error: 'Invalid freq — use weekly, biweekly, monthly, or null' })
 
-    if (auth.profile.role !== 'admin') {
+    if (!['admin', 'super_admin'].includes(auth.profile.role)) {
       const { data: quote } = await supabaseAdmin
         .from('quote_requests').select('buyer_business_id').eq('id', id).maybeSingle()
       if (!quote) return res.status(404).json({ error: 'Quote not found' })
       let buyerBusinessId = null
-      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email).maybeSingle()
+      const { data: biz } = await supabaseAdmin.from('businesses').select('id').eq('contact_email', auth.user.email.toLowerCase()).maybeSingle()
       if (biz) { buyerBusinessId = biz.id } else {
         const org = await resolveBusinessMembership(supabaseAdmin, auth.user.id, auth.user.email)
         buyerBusinessId = org?.business_id || null
