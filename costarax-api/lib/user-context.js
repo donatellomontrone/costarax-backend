@@ -41,7 +41,7 @@ async function resolveUserContext(db, userId, authEmail = null) {
   const [profileRes, orgRes] = await Promise.all([
     db.from('profiles').select('email, role, status').eq('id', userId).maybeSingle(),
     db.from('organization_members')
-      .select('user_id, supplier_id, business_id, suppliers(id,name,status,active,category,city,region), businesses(id,name,status,city,region)')
+      .select('user_id, supplier_id, business_id, suppliers(id,name,status,active,category,city,region,subscription_plan), businesses(id,name,status,city,region)')
       .eq('user_id', userId),
   ])
 
@@ -85,6 +85,7 @@ async function resolveUserContext(db, userId, authEmail = null) {
       category: supplierMembership.suppliers?.category || null,
       city: supplierMembership.suppliers?.city || null,
       region: supplierMembership.suppliers?.region || null,
+      subscription_plan: supplierMembership.suppliers?.subscription_plan || null,
     } : null,
     business: businessMembership ? {
       business_id: businessMembership.business_id,
@@ -116,7 +117,7 @@ async function resolveSupplierMembership(db, userId, authEmail = null) {
 
   const { data: supplierRows, error } = await db
     .from('suppliers')
-    .select('id, name, status, active, category, city, region, contact_email')
+    .select('id, name, status, active, category, city, region, contact_email, subscription_plan')
     .ilike('contact_email', email)
 
   if (error) {
@@ -136,6 +137,7 @@ async function resolveSupplierMembership(db, userId, authEmail = null) {
     category: best.category || null,
     city: best.city || null,
     region: best.region || null,
+    subscription_plan: best.subscription_plan || null,
     resolved_via: 'contact_email_fallback',
   }
 }
