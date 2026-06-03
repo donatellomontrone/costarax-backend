@@ -41,9 +41,10 @@ module.exports = async (req, res) => {
 
     if (insertErr) {
       if (insertErr.code === '23505') {
-        // Already exists — find existing id to allow document re-upload.
-        // Use maybeSingle() + order to be safe against duplicate rows
-        // (.single() would throw if somehow two rows share the email).
+        // Already exists — merge any newly-provided fields into the existing
+        // request (never overwrite a prior value with null) so a "finish your
+        // profile" step can enrich the original. Then return the id so any
+        // document uploads attach to the same row.
         const { data: existing } = await supabaseAdmin
           .from('access_requests')
           .select('id')
@@ -52,7 +53,14 @@ module.exports = async (req, res) => {
           .limit(1)
           .maybeSingle()
         if (existing?.id) {
-          return res.status(200).json({ id: existing.id, message: 'Request already submitted — documents will be added to your existing request.' })
+          const patch = { requested_role, company_name, business_type }
+          if (tin)           patch.tin = tin
+          if (contact_phone) patch.contact_phone = contact_phone
+          if (city)          patch.city = city
+          if (region)        patch.region = region
+          const { error: updErr } = await supabaseAdmin.from('access_requests').update(patch).eq('id', existing.id)
+          if (updErr) console.warn('access_request merge update failed:', updErr.message)
+          return res.status(200).json({ id: existing.id, message: 'Request updated.' })
         }
         return res.status(409).json({ error: 'This email has already submitted a request' })
       }
