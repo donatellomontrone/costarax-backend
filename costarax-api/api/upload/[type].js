@@ -63,11 +63,30 @@ const PRODUCT_METADATA_COLUMNS = [
 ]
 const SUPABASE_IN_CHUNK = 200
 const SUPABASE_WRITE_CHUNK = 200
+const SUPABASE_PAGE_SIZE = 1000
 
 function chunkArray(items, size = SUPABASE_IN_CHUNK) {
   const out = []
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
   return out
+}
+
+async function fetchAllActiveCatalogProducts() {
+  const rows = []
+  let from = 0
+  while (true) {
+    const to = from + SUPABASE_PAGE_SIZE - 1
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select('id, canonical_name, default_unit')
+      .eq('active', true)
+      .range(from, to)
+    if (error) throw new Error(error.message)
+    if (data?.length) rows.push(...data)
+    if (!data || data.length < SUPABASE_PAGE_SIZE) break
+    from += SUPABASE_PAGE_SIZE
+  }
+  return rows
 }
 
 let _productMetadataSchemaSupported = null
@@ -1328,8 +1347,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
 
   if (!extracted.length) return res.status(422).json({ error: 'No products found in the file.' })
 
-  const { data: catalog } = await supabaseAdmin.from('products').select('id, canonical_name, default_unit').eq('active', true)
-  const products = catalog || []
+  const products = await fetchAllActiveCatalogProducts()
   function normalize(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() }
   function tokens(s) { return normalize(s).split(' ').filter(t => t.length > 2) }
   const CUT_START_RX = /\b(strip\s*loin|striploin|rib\s*eye|ribeye|cube\s*roll|tenderloin|short\s*loin|sirloin|porterhouse|t-bone|tomahawk|chuck\s*roll|strip|loin|butter|salami|cheese|wagyu)\b/i

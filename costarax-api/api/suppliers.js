@@ -13,11 +13,32 @@ const PRODUCT_METADATA_COLUMNS = [
   'pack_weight',
 ]
 const SUPABASE_IN_CHUNK = 200
+const SUPABASE_PAGE_SIZE = 1000
 
 function chunkArray(items, size = SUPABASE_IN_CHUNK) {
   const out = []
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
   return out
+}
+
+async function fetchSupplierPriceRows(supplierId) {
+  const rows = []
+  let from = 0
+
+  while (true) {
+    const to = from + SUPABASE_PAGE_SIZE - 1
+    const { data, error } = await supabaseAdmin
+      .from('supplier_prices')
+      .select('id, product_id, price_php, stock_qty, unit, updated_at, active')
+      .eq('supplier_id', supplierId)
+      .range(from, to)
+    if (error) throw new Error(error.message)
+    if (data?.length) rows.push(...data)
+    if (!data || data.length < SUPABASE_PAGE_SIZE) break
+    from += SUPABASE_PAGE_SIZE
+  }
+
+  return rows
 }
 
 async function fetchProductsByIds(productIds) {
@@ -665,12 +686,7 @@ async function respond(res, suppliers) {
 }
 
 async function buildSupplierProductsState(supplierId) {
-  const { data: priceRows, error: priceErr } = await supabaseAdmin
-    .from('supplier_prices')
-    .select('id, product_id, price_php, stock_qty, unit, updated_at, active')
-    .eq('supplier_id', supplierId)
-
-  if (priceErr) throw new Error(priceErr.message)
+  const priceRows = await fetchSupplierPriceRows(supplierId)
 
   const productIds = [...new Set((priceRows || []).map(p => p.product_id).filter(Boolean))]
   const productMap = productIds.length > 0 ? await fetchProductsByIds(productIds) : {}
