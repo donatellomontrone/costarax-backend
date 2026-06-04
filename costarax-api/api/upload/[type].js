@@ -1119,8 +1119,15 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           { type: 'text', text: `${ruleBlock}\n\nThe price list is the attached image. Read every product line and emit the JSON array. Output ONLY JSON.` }
         ]
       }
-    } else {
+    } else if (!extracted.length) {
       // ── Text path (CSV / TSV / XLSX-converted) ─────────────────────────
+      // Guard with `!extracted.length`: the two-step commit flow POSTs
+      // { items } (no `text`/`file`), so `extracted` is already populated
+      // from providedItems above. Without this guard we'd fall in here,
+      // call parseCostaraxTemplate(undefined) → null → the AI chunker, and
+      // crash on `text.length` ("Cannot read properties of undefined
+      // (reading 'length')"). When items are pre-supplied, skip extraction
+      // entirely and fall straight through to the catalog-match + save.
       // 1. Try direct template parse (no AI needed, handles all rows).
       const tmplItems = parseCostaraxTemplate(text, supplierName)
       if (tmplItems && tmplItems.length > 0) {
