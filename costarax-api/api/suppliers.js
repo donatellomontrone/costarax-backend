@@ -12,6 +12,44 @@ const PRODUCT_METADATA_COLUMNS = [
   'form_factor',
   'pack_weight',
 ]
+const SUPABASE_IN_CHUNK = 200
+
+function chunkArray(items, size = SUPABASE_IN_CHUNK) {
+  const out = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
+async function fetchProductsByIds(productIds) {
+  const ids = [...new Set((productIds || []).filter(Boolean))]
+  if (!ids.length) return {}
+
+  const includeMetadata = await productMetadataSchemaSupported()
+  const selectCols = productSelectColumns(includeMetadata)
+  const productMap = {}
+
+  for (const batch of chunkArray(ids)) {
+    const { data: prods, error: prodErr } = await supabaseAdmin
+      .from('products')
+      .select(selectCols)
+      .in('id', batch)
+    if (prodErr) throw new Error(prodErr.message)
+    ;(prods || []).forEach(p => { productMap[p.id] = p })
+  }
+
+  return productMap
+}
+
+async function deleteSupplierPricesByProductIds(supplierId, productIds) {
+  for (const batch of chunkArray(normalizeUuidArray(productIds))) {
+    const { error } = await supabaseAdmin
+      .from('supplier_prices')
+      .delete()
+      .eq('supplier_id', supplierId)
+      .in('product_id', batch)
+    if (error) throw new Error(error.message)
+  }
+}
 let _productMetadataSchemaSupported = null
 async function productMetadataSchemaSupported() {
   if (_productMetadataSchemaSupported !== null) return _productMetadataSchemaSupported
@@ -77,12 +115,14 @@ module.exports = async (req, res) => {
         const makeActive = body.make_active === true
         if (!productIds.length) return res.status(400).json({ error: 'No product selected' })
 
-        const { error } = await supabaseAdmin
-          .from('supplier_prices')
-          .update({ active: makeActive, updated_at: new Date().toISOString() })
-          .eq('supplier_id', supplierId)
-          .in('product_id', productIds)
-        if (error) return res.status(500).json({ error: error.message })
+        for (const batch of chunkArray(productIds)) {
+          const { error } = await supabaseAdmin
+            .from('supplier_prices')
+            .update({ active: makeActive, updated_at: new Date().toISOString() })
+            .eq('supplier_id', supplierId)
+            .in('product_id', batch)
+          if (error) return res.status(500).json({ error: error.message })
+        }
 
         const state = await buildSupplierProductsState(supplierId)
         return res.status(200).json({
@@ -96,12 +136,11 @@ module.exports = async (req, res) => {
         const productIds = normalizeUuidArray(body.product_ids || body.product_id)
         if (!productIds.length) return res.status(400).json({ error: 'No product selected' })
 
-        const { error } = await supabaseAdmin
-          .from('supplier_prices')
-          .delete()
-          .eq('supplier_id', supplierId)
-          .in('product_id', productIds)
-        if (error) return res.status(500).json({ error: error.message })
+        try {
+          await deleteSupplierPricesByProductIds(supplierId, productIds)
+        } catch (error) {
+          return res.status(500).json({ error: error.message })
+        }
 
         const state = await buildSupplierProductsState(supplierId)
         return res.status(200).json({
@@ -634,16 +673,7 @@ async function buildSupplierProductsState(supplierId) {
   if (priceErr) throw new Error(priceErr.message)
 
   const productIds = [...new Set((priceRows || []).map(p => p.product_id).filter(Boolean))]
-  let productMap = {}
-  if (productIds.length > 0) {
-    const includeMetadata = await productMetadataSchemaSupported()
-    const { data: prods, error: prodErr } = await supabaseAdmin
-      .from('products')
-      .select(productSelectColumns(includeMetadata))
-      .in('id', productIds)
-    if (prodErr) throw new Error(prodErr.message)
-    ;(prods || []).forEach(p => { productMap[p.id] = p })
-  }
+  const productMap = productIds.length > 0 ? await fetchProductsByIds(productIds) : {}
 
   const collapseRows = rows => {
     const deduped = new Map()

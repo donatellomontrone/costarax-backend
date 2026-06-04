@@ -61,6 +61,14 @@ const PRODUCT_METADATA_COLUMNS = [
   'form_factor',
   'pack_weight',
 ]
+const SUPABASE_IN_CHUNK = 200
+const SUPABASE_WRITE_CHUNK = 200
+
+function chunkArray(items, size = SUPABASE_IN_CHUNK) {
+  const out = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
 
 let _productMetadataSchemaSupported = null
 async function productMetadataSchemaSupported() {
@@ -1433,11 +1441,18 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     })
     // Upsert: on conflict (canonical_name, default_unit) update the row so we
     // get back the id whether the product is new or already existed in the catalog.
-    const { data: newProducts, error: iErr } = await supabaseAdmin.from('products')
-      .upsert(insertPayload, { onConflict: 'canonical_name,default_unit', ignoreDuplicates: false })
-      .select('id, canonical_name, default_unit')
-    insertError = iErr?.message || null
-    if (newProducts) {
+    const newProducts = []
+    for (const batch of chunkArray(insertPayload, SUPABASE_WRITE_CHUNK)) {
+      const { data: batchProducts, error: iErr } = await supabaseAdmin.from('products')
+        .upsert(batch, { onConflict: 'canonical_name,default_unit', ignoreDuplicates: false })
+        .select('id, canonical_name, default_unit')
+      if (iErr) {
+        insertError = iErr.message
+        break
+      }
+      if (batchProducts?.length) newProducts.push(...batchProducts)
+    }
+    if (!insertError && newProducts.length) {
       created = newProducts.length
       const idLookup = new Map()
       newProducts.forEach(p => { idLookup.set(`${p.canonical_name.toLowerCase()}__${(p.default_unit||'kg').toLowerCase()}`, p.id) })
@@ -1458,12 +1473,24 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
   const anomalies = []
   if (priceRows.length) {
     const productIds = priceRows.map(r => r.product_id)
-    const { data: marketPrices } = await supabaseAdmin
-      .from('supplier_prices')
-      .select('product_id, price_php, unit, supplier_id')
-      .in('product_id', productIds)
-      .eq('active', true)
-      .neq('supplier_id', supplierId || '')
+    const marketPrices = []
+    for (const batch of chunkArray(productIds)) {
+      const { data: batchPrices, error: marketErr } = await supabaseAdmin
+        .from('supplier_prices')
+        .select('product_id, price_php, unit, supplier_id')
+        .in('product_id', batch)
+        .eq('active', true)
+        .neq('supplier_id', supplierId || '')
+      if (marketErr) {
+        upsertError = 'Could not inspect market prices: ' + marketErr.message
+        break
+      }
+      if (batchPrices?.length) marketPrices.push(...batchPrices)
+    }
+    if (upsertError) {
+      // Skip anomaly inspection entirely if the support query failed.
+      // Save-path error handling below will return a real error response.
+    } else {
     const byProduct = {}
     ;(marketPrices || []).forEach(mp => {
       if (!byProduct[mp.product_id]) byProduct[mp.product_id] = []
@@ -1487,6 +1514,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
         })
       }
     })
+    }
   }
 
   const dedupedPriceRows = collapsePriceRows(priceRows)
@@ -1497,16 +1525,25 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     // find; scoping the delete to the incoming product_ids also prevents the
     // duplicate-on-retry growth the old full-replace was guarding against.
     const incomingIds = [...new Set(dedupedPriceRows.map(r => r.product_id))]
-    const { error: deleteErr } = await supabaseAdmin
-      .from('supplier_prices')
-      .delete()
-      .eq('supplier_id', supplierId)
-      .in('product_id', incomingIds)
-    if (deleteErr) {
-      upsertError = 'Could not clear existing supplier prices: ' + deleteErr.message
-    } else {
-      const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(dedupedPriceRows)
-      upsertError = uErr ? ('Could not save supplier prices: ' + uErr.message) : null
+    for (const batch of chunkArray(incomingIds)) {
+      const { error: deleteErr } = await supabaseAdmin
+        .from('supplier_prices')
+        .delete()
+        .eq('supplier_id', supplierId)
+        .in('product_id', batch)
+      if (deleteErr) {
+        upsertError = 'Could not clear existing supplier prices: ' + deleteErr.message
+        break
+      }
+    }
+    if (!upsertError) {
+      for (const batch of chunkArray(dedupedPriceRows, SUPABASE_WRITE_CHUNK)) {
+        const { error: uErr } = await supabaseAdmin.from('supplier_prices').insert(batch)
+        if (uErr) {
+          upsertError = 'Could not save supplier prices: ' + uErr.message
+          break
+        }
+      }
     }
   }
 
