@@ -77,6 +77,62 @@ function titleCaseWords(s) {
   return String(s || '').replace(/\b\w/g, c => c.toUpperCase()).trim()
 }
 
+// ── Product category taxonomy — single source of truth ─────────────────────
+// 8 canonical buckets, IDENTICAL to the buyer-facing search filter (`CATS` in
+// the SPA files) so a "dairy" product is filterable under the Dairy chip, a
+// "cleaning" product under Cleaning, etc. Keeping upload + search on one
+// taxonomy is the whole point: categorise once, filter everywhere.
+// Keep in sync with `const CATS` in app.html / supplier.html / buyer.html.
+const CANON_CATS = ['meat', 'seafood', 'produce', 'dairy', 'dry', 'beverages', 'cleaning', 'packaging']
+
+// Strip diacritics + lowercase so Italian/Spanish terms match regardless of
+// accents (caffè→caffe, baccalà→baccala, jalapeño→jalapeno).
+function deburr(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+}
+
+// Whole-word category regexes. Whole-word (\b…\b) avoids prefix false positives
+// (e.g. "butter" must not swallow "butternut squash"); plural / inflected forms
+// are therefore listed explicitly across EN / Tagalog (TL) / Italian (IT).
+const CAT_RX = {
+  dairy:     /\b(milk|cheese|cheeses|formaggi|formaggio|latticini|gatas|keso|yogurt|yoghurt|butter|mantikilya|sour cream|heavy cream|whipping cream|cream cheese|panna|mozzarella|mozzarelle|burrata|mascarpone|ricotta|parmesan|parmigiano|grana|pecorino|gorgonzola|provolone|scamorza|stracchino|taleggio|fontina|gouda|cheddar|brie|camembert|feta|gelato|condensed milk|evaporated milk|condensada|kremang)\b/,
+  meat:      /\b(beef|manzo|pork|maiale|chicken|pollo|poultry|lamb|agnello|veal|vitello|duck|turkey|goat|meat|meats|carne|carni|brisket|tenderloin|loin|chuck|rib|ribs|wagyu|tomahawk|striploin|strip loin|sirloin|ribeye|rib eye|steak|steaks|cube roll|t-bone|porterhouse|rump|rack|short loin|short rib|hanger|skirt|flank|filet|fillet|liempo|kasim|baboy|baka|manok|itik|lechon|salami|salame|salumi|chorizo|pancetta|guanciale|speck|prosciutto|jamon|bacon|ham|sausage|sausages|wurstel|longganisa|spam|hotdog|frank|patty|nugget|mortadella|bresaola|coppa)\b/,
+  seafood:   /\b(fish|fishes|isda|pesce|seafood|shrimp|shrimps|prawn|prawns|gambero|gamberi|gamberetti|scampi|squid|calamari|calamaro|seppia|seppie|pusit|crab|crabs|alimasag|alimango|lobster|salmon|salmone|tuna|tonno|tilapia|bangus|milkfish|galunggong|lapu-lapu|grouper|maya-maya|snapper|branzino|orata|merluzzo|baccala|mackerel|sardine|sardines|herring|anchovy|acciughe|cod|haddock|catfish|hito|dilis|tahong|mussel|mussels|cozze|vongole|oyster|oysters|talaba|hipon|sugpo|kalamares|scallop|scallops|abalone|polpo|seaweed|nori|wakame|kani)\b/,
+  produce:   /\b(vegetable|vegetables|verdura|verdure|veg|gulay|fruit|fruits|frutta|prutas|salad|herb|herbs|mushroom|mushrooms|funghi|tomato|tomatoes|pomodori|cabbage|onion|onions|cipolle|potato|potatoes|patate|carrot|carrots|lettuce|garlic|ginger|chili|cucumber|eggplant|aubergine|squash|zucchini|zucchine|spinach|kale|broccoli|cauliflower|asparagus|corn|peas|sprout|leek|celery|radish|turnip|beetroot|avocado|apple|apples|banana|mango|papaya|orange|oranges|lemon|lime|pineapple|watermelon|melon|grape|grapes|berry|berries|egg|eggs|itlog|niyog|kamatis|sibuyas|bawang|luya|sili|patatas|kalabasa|repolyo|kangkong|pechay|ampalaya|talong|sayote|basil|basilico|rucola|arugula|radicchio)\b/,
+  beverages: /\b(drink|drinks|inumin|juice|juices|water|tubig|acqua|soda|softdrink|soft drink|beverage|beverages|bibite|beer|serbesa|wine|wines|vino|vini|alcohol|alak|whiskey|whisky|vodka|rum|gin|tequila|liqueur|liquor|spirit|cocktail|champagne|prosecco|cola|sprite|fanta|gatorade|energy drink|smoothie|shake|succo|succhi|spremuta|spremute|aranciata)\b/,
+  cleaning:  /\b(detergent|detergents|detergente|detergenti|detersivo|detersivi|soap|sabon|sapone|bleach|candeggina|disinfectant|disinfettante|sanitizer|sanitiser|sanitising|igienizzante|cleaner|cleaning|degreaser|dishwash|dishwashing|janitorial|hand wash|tissue|tissues|napkin|napkins|toilet|mop|sponge|scourer|glove|gloves)\b/,
+  packaging: /\b(box|boxes|bag|bags|container|containers|tray|trays|packaging|imballaggio|wrap|wrapper|foil|cling|plastic|aluminum|aluminium|cup|cups|plate|plates|straw|straws|utensil|cutlery|posate|kahon|sako|supot|baso|plato|pakete|clamshell|takeout|take-out)\b/,
+  dry:       /\b(rice|riso|bigas|flour|farina|harina|oil|oils|olio|oli|sugar|asukal|zucchero|salt|asin|sale|sauce|sauces|salsa|salse|sugo|sughi|vinegar|aceto|suka|canned|conserva|conserve|spice|spices|spezie|pepper|coffee|caffe|kape|tea|noodle|noodles|pasta|paste|spaghetti|penne|fusilli|conchiglie|farfalle|rigatoni|maccheroni|macaroni|lasagna|lasagne|gnocchi|risotto|polenta|passata|pomodoro|pelati|pesto|olive|olives|dried|powder|cereal|grain|grains|legume|legumi|lentil|lenticchie|chickpea|ceci|fagioli|beans|sotanghon|miki|bihon|misua|pancit|kakao|chocolate|cioccolato|cocoa|honey|miele|pulot|toyo|patis|gata|mantika)\b/,
+}
+const CAT_ORDER = ['dairy', 'meat', 'seafood', 'produce', 'beverages', 'cleaning', 'packaging', 'dry']
+
+// Map a supplier-provided category LABEL (EN / TL / IT / common foodservice
+// department names) onto one of CANON_CATS. The supplier's own label is usually
+// more reliable than guessing from a foreign / abbreviated product name, so
+// callers try this first. Returns null when nothing matches so the caller can
+// fall back to inferCategory(name).
+function normalizeCategoryLabel(raw) {
+  if (!raw) return null
+  const c = deburr(raw).replace(/[^a-z0-9\s&/-]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!c) return null
+  if (CANON_CATS.includes(c)) return c
+  // A few label-only aliases the per-word regexes don't carry.
+  if (/\b(deli|charcuterie|cold cut|cured)\b/.test(c)) return 'meat'
+  if (/\b(grocery|pantry|staple|dry goods|condiment|baking)\b/.test(c)) return 'dry'
+  if (/\b(disposable|disposables|non[- ]?food|supplies)\b/.test(c)) return 'packaging'
+  if (/\b(sanitation|hygiene|pulizia)\b/.test(c)) return 'cleaning'
+  for (const cat of CAT_ORDER) if (CAT_RX[cat].test(c)) return cat
+  return null
+}
+
+// Infer a category from a product NAME. dairy is tested BEFORE dry so
+// cheeses / creams don't fall into the dry bucket. Always returns a value.
+function inferCategory(name) {
+  const n = deburr(name)
+  for (const cat of CAT_ORDER) if (CAT_RX[cat].test(n)) return cat
+  return 'dry' // broadest catch-all bucket
+}
+
 function inferStructuredProductMeta(rawName, unit, explicit = {}) {
   const raw = String(rawName || '').replace(/\s+/g, ' ').trim()
   const safeUnit = String(unit || '').trim() || 'kg'
@@ -210,35 +266,8 @@ function parseCostaraxTemplate(text, supplierName) {
   const categoryIdx = headers.findIndex(h => isHeader(h, HDR.category))
   const packSizeIdx = headers.findIndex(h => isHeader(h, HDR.pack_size))
 
-  const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
-  function normaliseCategory(raw) {
-    if (!raw) return null
-    const c = String(raw).toLowerCase().trim()
-    if (VALID_CATS.includes(c)) return c
-    if (c === 'dry goods' || c === 'dry_goods') return 'dry'
-    if (c === 'beverage') return 'beverages'
-    if (c === 'fish' || c === 'seafood ') return 'seafood'
-    return null
-  }
-  function inferCat(name) {
-    const n = name.toLowerCase()
-    // Meat — EN + TL (baka/baboy/manok/lechon), specific cuts, premium grades
-    if (/\b(beef|pork|chicken|poultry|lamb|veal|duck|turkey|goat|meat|brisket|tenderloin|loin|chuck|rib|wagyu|tomahawk|striploin|strip loin|sirloin|ribeye|rib eye|cube roll|t-bone|porterhouse|rack|short loin|short rib|hanger|skirt|flank|filet|fillet|liempo|kasim|sinigang|baboy|baka|manok|hipon|itik|lechon|salami|chorizo|bacon|ham|prosciutto|jamon|sausage|longganisa|spam|hotdog|frank|patty|nugget)\b/.test(n)) return 'meat'
-    // Seafood — EN + TL fish names, shellfish
-    if (/\b(fish|shrimp|prawn|squid|seafood|crab|lobster|salmon|tuna|tilapia|bangus|milkfish|galunggong|lapu-lapu|grouper|maya-maya|snapper|mackerel|sardine|herring|anchovy|cod|haddock|catfish|hito|dilis|tahong|mussel|oyster|talaba|alimasag|alimango|hipon|sugpo|pusit|kalamares|scallop|abalone|seaweed|nori|wakame|kani)\b/.test(n)) return 'seafood'
-    // Produce — vegetables, fruits, eggs (TL terms)
-    if (/\b(vegetable|fruit|egg|tomato|cabbage|onion|potato|carrot|lettuce|mushroom|herb|garlic|ginger|chili|pepper|cucumber|eggplant|squash|zucchini|spinach|kale|broccoli|cauliflower|asparagus|corn|peas|bean|sprout|leek|celery|radish|turnip|beet|avocado|apple|banana|mango|papaya|orange|lemon|lime|pineapple|watermelon|melon|grape|berry|coconut|niyog|kamatis|sibuyas|bawang|luya|sili|patatas|kalabasa|repolyo|gulay|prutas|itlog|kangkong|pechay|ampalaya|talong|sayote)\b/.test(n)) return 'produce'
-    // Dairy — milk, cheese, butter, yogurt (TL gatas)
-    if (/\b(milk|cheese|butter|yogurt|cream|sour cream|cottage|mozzarella|cheddar|parmesan|gouda|brie|camembert|feta|ricotta|mascarpone|gatas|keso|mantikilya|tuyong gatas|condensed|evaporated|condensada|kremang)\b/.test(n)) return 'dry'
-    // Dry goods — rice, flour, oil, condiments, dry pantry
-    if (/\b(rice|flour|oil|sugar|salt|sauce|vinegar|canned|spice|pepper|coffee|tea|noodle|pasta|dried|powder|cereal|grain|grains|legume|lentil|bigas|harina|asukal|asin|toyo|patis|suka|gata|kape|mantika|sotanghon|miki|mami|bihon|misua|pancit|kakao|chocolate|cocoa|honey|pulot)\b/.test(n)) return 'dry'
-    // Beverages — drinks, juice, water, alcohol
-    if (/\b(drink|juice|water|soda|beverage|beer|wine|alcohol|whiskey|vodka|rum|gin|tequila|liqueur|spirit|cocktail|champagne|prosecco|cola|sprite|fanta|gatorade|energy drink|smoothie|shake|inumin|tubig|alak|serbesa|tubig)\b/.test(n)) return 'beverages'
-    // Packaging — containers, wrappers, disposables
-    if (/\b(box|bag|container|tray|packaging|wrap|wrapper|foil|cling|plastic|aluminum|paper|napkin|tissue|cup|plate|straw|utensil|cutlery|kahon|sako|supot|baso|plato|pakete)\b/.test(n)) return 'packaging'
-    // Fallback — dry is the broadest catch-all bucket
-    return 'dry'
-  }
+  // Category logic lives at module scope (normalizeCategoryLabel / inferCategory)
+  // so the AI and commit save paths share the exact same taxonomy.
 
   const items = []
   // Track (canonical, unit) occurrences so we can disambiguate true duplicates
@@ -290,10 +319,9 @@ function parseCostaraxTemplate(text, supplierName) {
     if (seenCount > 0) canonical = `${canonical} (${seenCount + 1})`
     seenKeyCount.set(dedupKey, seenCount + 1)
 
-    // Use the explicit category when valid, otherwise infer from the
-    // canonical name. The downstream catalog upsert requires one of the
-    // VALID_CATS values.
-    const category = normaliseCategory(categoryRaw) || inferCat(canonical)
+    // Prefer the supplier's own category label (most reliable), otherwise
+    // infer from the canonical name. Always resolves to one of CANON_CATS.
+    const category = normalizeCategoryLabel(categoryRaw) || inferCategory(canonical)
 
     items.push({
       name: rawName,
@@ -615,7 +643,7 @@ async function handlePriceList(req, res) {
     // emit them is wasted output tokens (~260 vs ~80 per item = 3× the
     // tokens per chunk = 3× the rate-limit cost on Tier 1's 10k tokens/min).
     const ruleBlock = `Extract products from this price list. Return JSON array only.
-Each item: {"canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dry|beverages|packaging","stock":number_or_null}
+Each item: {"canonical":"Full English Name No Abbreviations","price":number,"unit":"kg/pc/box/etc","category":"meat|seafood|produce|dairy|dry|beverages|cleaning|packaging","stock":number_or_null}
 Rules: skip items without price. For price ranges use lower value. Expand abbreviations (mb2=Marble Grade 2, MS6-7=Marble Score 6-7).
 CRITICAL canonical naming:
 1. canonical MUST start with the brand/producer if mentioned (look at rightmost column / end of row).
@@ -625,7 +653,7 @@ CRITICAL canonical naming:
 5. Same cut + different brand/grade MUST get different canonicals. Never collapse.
 Examples: "Mayura Platinum Label Tenderloin MB9+" vs "Mayura Signature Series Tenderloin MB8-9+", "Hardwick Australian Lamb Rack Frenched Bone In" vs "Wagstaff Australian Lamb Rack Frenched Bone In".
 stock: if source has stock/qty column with number, return it. If "out of stock"/"OOS", return 0. Otherwise null.
-Category: meat=beef/lamb/pork/chicken/poultry, seafood=fish/shrimp/squid/crab/scallop, produce=vegetables/fruits/eggs, dry=rice/flour/oil/canned/spices/pasta, beverages=drinks/juice/water/coffee, packaging=boxes/bags/containers.
+Category: meat=beef/lamb/pork/chicken/poultry/cured meats/salami/sausage, seafood=fish/shrimp/squid/crab/scallop, produce=vegetables/fruits/eggs/herbs/mushrooms, dairy=milk/cheese/butter/cream/yogurt/mozzarella/parmesan, dry=rice/flour/oil/canned/spices/pasta/sauce/coffee/sugar, beverages=drinks/juice/water/soda/wine/beer, cleaning=detergents/sanitizers/janitorial/disposable napkins, packaging=boxes/bags/containers/cups/cutlery. Put cheese and any milk-based product in dairy, NOT dry.
 Supplier: ${supplierName}`
 
     // maxRetries: 0 disables the SDK's internal exponential-backoff retry on
@@ -985,7 +1013,6 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             const k = `${normalize2(canonical)}__${(unit||'').toLowerCase().trim()}`
             return productsByExactKey2.get(k) || null
           }
-          const VALID_CATS = ['meat','seafood','produce','dry','beverages','packaging']
           const validItems2 = collapseExtractedItems(extracted)
           dx.after_collapse_extracted = validItems2.length
           dx.catalog_size = products2.length
@@ -997,7 +1024,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           const matchedProductIdCounts = new Map()
           for (const item of validItems2) {
             const canonicalName = (item.canonical||item.name).trim()
-            const category_id = VALID_CATS.includes(item.category) ? item.category : 'dry'
+            const category_id = CANON_CATS.includes(item.category) ? item.category : (normalizeCategoryLabel(item.category) || inferCategory(canonicalName))
             const unit = (item.unit||'kg').trim()
             const product = matchProductStrict2(canonicalName, unit)
             const stock_qty = parseStock2(item.stock)
@@ -1352,7 +1379,6 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     return productsByExactKey.get(k) || null
   }
 
-  const VALID_CATEGORIES = ['meat', 'seafood', 'produce', 'dry', 'beverages', 'packaging']
   const validItems = collapseExtractedItems(extracted)
   const toCreate = []
   const priceRows = []
@@ -1365,7 +1391,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
 
   for (const item of validItems) {
     const canonicalName = (item.canonical || item.name).trim()
-    const category_id = VALID_CATEGORIES.includes(item.category) ? item.category : 'dry'
+    const category_id = CANON_CATS.includes(item.category) ? item.category : (normalizeCategoryLabel(item.category) || inferCategory(canonicalName))
     const unit = (item.unit || 'kg').trim()
     const product = useStrictMatching
       ? matchProductStrict(canonicalName, unit)
