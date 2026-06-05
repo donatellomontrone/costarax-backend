@@ -12,8 +12,10 @@ test('normalizeLinkResult always returns stable array fields', () => {
   assert.deepEqual(result, {
     user_id: 'u1',
     supplier_id: 's1',
+    business_id: null,
     displaced_user_ids: [],
     removed_supplier_ids: [],
+    removed_business_ids: [],
   })
 })
 
@@ -54,7 +56,9 @@ test('replaceSupplierLink prefers the SQL RPC path when available', async () => 
   assert.deepEqual(result, {
     user_id: 'u1',
     supplier_id: 's1',
+    business_id: null,
     displaced_user_ids: ['u2'],
     removed_supplier_ids: ['s_old'],
+    removed_business_ids: [],
   })
 })

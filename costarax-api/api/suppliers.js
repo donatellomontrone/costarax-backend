@@ -2,6 +2,7 @@ const { supabaseAdmin, verifyToken, requireAuth } = require('../lib/supabase-adm
 const { sendEmail } = require('../lib/email')
 const { applyCors } = require('../lib/cors')
 const { resolveSupplierMembership } = require('../lib/user-context')
+const { chunkArray, pruneUnreferencedProducts } = require('../lib/orphan-products')
 
 const PRODUCT_METADATA_COLUMNS = [
   'producer',
@@ -12,14 +13,7 @@ const PRODUCT_METADATA_COLUMNS = [
   'form_factor',
   'pack_weight',
 ]
-const SUPABASE_IN_CHUNK = 200
 const SUPABASE_PAGE_SIZE = 1000
-
-function chunkArray(items, size = SUPABASE_IN_CHUNK) {
-  const out = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
-}
 
 async function fetchSupplierPriceRows(supplierId) {
   const rows = []
@@ -157,8 +151,10 @@ module.exports = async (req, res) => {
         const productIds = normalizeUuidArray(body.product_ids || body.product_id)
         if (!productIds.length) return res.status(400).json({ error: 'No product selected' })
 
+        let pruneSummary = null
         try {
           await deleteSupplierPricesByProductIds(supplierId, productIds)
+          pruneSummary = await pruneUnreferencedProducts(supabaseAdmin, productIds)
         } catch (error) {
           return res.status(500).json({ error: error.message })
         }
@@ -167,6 +163,7 @@ module.exports = async (req, res) => {
         return res.status(200).json({
           message: `Deleted ${productIds.length} product${productIds.length > 1 ? 's' : ''}`,
           state,
+          cleanup: pruneSummary,
         })
       }
 
