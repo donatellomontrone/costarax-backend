@@ -16,6 +16,7 @@ const pdfParse = require('pdf-parse')
 const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { applyCors } = require('../../lib/cors')
 const { resolveSupplierMembership } = require('../../lib/user-context')
+const { projectCatalogSizeAfterUpload } = require('../../lib/upload-mode')
 
 exports.config = { api: { bodyParser: false } }
 
@@ -79,6 +80,26 @@ async function fetchAllActiveCatalogProducts() {
     const { data, error } = await supabaseAdmin
       .from('products')
       .select('id, canonical_name, default_unit')
+      .eq('active', true)
+      .range(from, to)
+    if (error) throw new Error(error.message)
+    if (data?.length) rows.push(...data)
+    if (!data || data.length < SUPABASE_PAGE_SIZE) break
+    from += SUPABASE_PAGE_SIZE
+  }
+  return rows
+}
+
+async function fetchAllActiveSupplierPriceRows(supplierId) {
+  if (!supplierId) return []
+  const rows = []
+  let from = 0
+  while (true) {
+    const to = from + SUPABASE_PAGE_SIZE - 1
+    const { data, error } = await supabaseAdmin
+      .from('supplier_prices')
+      .select('product_id')
+      .eq('supplier_id', supplierId)
       .eq('active', true)
       .range(from, to)
     if (error) throw new Error(error.message)
@@ -396,7 +417,8 @@ async function handlePriceList(req, res) {
   //     back here. We skip parsing entirely and feed them straight into
   //     the catalog-match + DB-write pipeline.
   // Old clients keep working unchanged.
-  const { text, file_name, file_b64, file_mime, dry_run, items: providedItems } = body || {}
+  const { text, file_name, file_b64, file_mime, dry_run, replace_all, items: providedItems } = body || {}
+  const replaceAll = replace_all === true
   const hasText = typeof text === 'string' && text.trim().length >= 10
   const hasFile = typeof file_b64 === 'string' && file_b64.length > 100 && typeof file_mime === 'string'
   const hasItems = Array.isArray(providedItems) && providedItems.length > 0
@@ -463,24 +485,11 @@ async function handlePriceList(req, res) {
   if (!supplierId && auth.profile.role !== 'admin') {
     return res.status(403).json({ error: 'No supplier linked to this account' })
   }
+  let supplierPlan = 'basic'
   if (supplierId) {
     const { data: sup } = await supabaseAdmin.from('suppliers').select('name, subscription_plan').eq('id', supplierId).single()
     if (sup?.name) supplierName = sup.name
-    // Basic-plan catalog cap: 100 indexed products. Once a Basic supplier is at
-    // the cap, block further growth (price updates to existing products still
-    // flow through the Products tab). Pro/Corporate are uncapped. The frontend
-    // pre-checks the resulting size; this is the server-side safety net.
-    if (auth.profile.role !== 'admin' && String(sup?.subscription_plan || 'basic').toLowerCase() === 'basic') {
-      const { data: existingPr } = await supabaseAdmin
-        .from('supplier_prices').select('product_id').eq('supplier_id', supplierId).eq('active', true)
-      const distinctProducts = new Set((existingPr || []).map(r => r.product_id)).size
-      if (distinctProducts >= 100) {
-        return res.status(403).json({
-          error: 'Basic plan is limited to 100 products. Upgrade to Pro for unlimited products — you can still update existing prices from the Products tab.',
-          code: 'PLAN_PRODUCT_CAP', plan: 'basic', limit: 100, current: distinctProducts
-        })
-      }
-    }
+    supplierPlan = String(sup?.subscription_plan || 'basic').toLowerCase()
   }
 
   const { data: uploadRecord } = await supabaseAdmin
@@ -1536,22 +1545,49 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
   }
 
   const dedupedPriceRows = collapsePriceRows(priceRows)
+  const incomingIds = [...new Set(dedupedPriceRows.map(r => r.product_id))]
+
+  if (auth.profile.role !== 'admin' && supplierId && supplierPlan === 'basic' && incomingIds.length) {
+    const existingPr = await fetchAllActiveSupplierPriceRows(supplierId)
+    const existingIds = new Set((existingPr || []).map(r => r.product_id).filter(Boolean))
+    const currentDistinct = existingIds.size
+    const projectedDistinct = projectCatalogSizeAfterUpload([...existingIds], incomingIds, replaceAll)
+    if (projectedDistinct > 100) {
+      return res.status(403).json({
+        error: `Basic plan is limited to 100 products. This upload would leave your catalog with ${projectedDistinct} indexed products.`,
+        code: 'PLAN_PRODUCT_CAP',
+        plan: 'basic',
+        limit: 100,
+        current: currentDistinct,
+        projected: projectedDistinct,
+        mode: replaceAll ? 'replace' : 'merge'
+      })
+    }
+  }
+
   if (dedupedPriceRows.length && supplierId) {
-    // Merge semantics: replace only the prices for products present in THIS
-    // upload, leaving the supplier's other products (from earlier uploads)
-    // intact. A full wipe used to silently delete products a buyer could still
-    // find; scoping the delete to the incoming product_ids also prevents the
-    // duplicate-on-retry growth the old full-replace was guarding against.
-    const incomingIds = [...new Set(dedupedPriceRows.map(r => r.product_id))]
-    for (const batch of chunkArray(incomingIds)) {
+    if (replaceAll) {
       const { error: deleteErr } = await supabaseAdmin
         .from('supplier_prices')
         .delete()
         .eq('supplier_id', supplierId)
-        .in('product_id', batch)
       if (deleteErr) {
-        upsertError = 'Could not clear existing supplier prices: ' + deleteErr.message
-        break
+        upsertError = 'Could not replace current supplier prices: ' + deleteErr.message
+      }
+    } else {
+      // Merge semantics: replace only the prices for products present in THIS
+      // upload, leaving the supplier's other products (from earlier uploads)
+      // intact.
+      for (const batch of chunkArray(incomingIds)) {
+        const { error: deleteErr } = await supabaseAdmin
+          .from('supplier_prices')
+          .delete()
+          .eq('supplier_id', supplierId)
+          .in('product_id', batch)
+        if (deleteErr) {
+          upsertError = 'Could not clear existing supplier prices: ' + deleteErr.message
+          break
+        }
       }
     }
     if (!upsertError) {
@@ -1601,9 +1637,9 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     ? ` ⚠ ${anomalies.length} price anomal${anomalies.length === 1 ? 'y' : 'ies'} flagged for review.`
     : ''
   return res.status(201).json({
-    message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed (${created} new added to catalog).${anomalyMsg}`,
+    message: `Done! ${matched} product${matched !== 1 ? 's' : ''} indexed (${created} new added to catalog)${replaceAll ? ' — your current catalog was replaced with this upload' : ''}.${anomalyMsg}`,
     extracted: extracted.length, validItems: validItems.length, toCreate: toCreate.length, matched, created,
-    insertError, upsertError, anomalies, sampleExtracted: extracted.slice(0, 2)
+    insertError, upsertError, anomalies, sampleExtracted: extracted.slice(0, 2), mode: replaceAll ? 'replace' : 'merge'
   })
 }
 
