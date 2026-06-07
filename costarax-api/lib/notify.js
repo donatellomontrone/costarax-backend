@@ -182,4 +182,45 @@ async function notify({ event, to, data = {} }) {
   ])
 }
 
-module.exports = { notify }
+// ---------------------------------------------------------------------------
+// Free-form (session) messages — used by the WhatsApp/Viber <-> in-app chat
+// relay. Unlike notify() (which sends pre-approved templates), these send the
+// actual conversation text. WhatsApp allows free-form text only inside the
+// 24h customer-care window (i.e. after the user messaged the business number).
+// ---------------------------------------------------------------------------
+
+async function sendWhatsAppText(to, text) {
+  const cfg = getConfig()
+  if (!cfg.apiKey || !cfg.baseUrl || !cfg.whatsapp) return { skipped: 'whatsapp not configured' }
+  const phone = e164PH(to)
+  if (!phone || !text) return { skipped: 'no phone/text' }
+  try {
+    const res = await infobipPost('/whatsapp/1/message/text', {
+      from: cfg.whatsapp,
+      to: phone,
+      content: { text: String(text).slice(0, 4000) },
+    }, cfg.apiKey, cfg.baseUrl)
+    if (res.status >= 400) console.warn('[notify] WA text failed:', res.status, JSON.stringify(res.body))
+    return res
+  } catch (e) { console.error('[notify] WA text error:', e.message); return { error: e.message } }
+}
+
+async function sendViberText(to, text) {
+  const cfg = getConfig()
+  if (!cfg.apiKey || !cfg.baseUrl || !cfg.viber) return { skipped: 'viber not configured' }
+  const phone = e164PH(to)
+  if (!phone || !text) return { skipped: 'no phone/text' }
+  try {
+    const res = await infobipPost('/viber/2/messages', {
+      messages: [{
+        sender: cfg.viber,
+        destinations: [{ to: phone }],
+        content: { type: 'TEXT', text: String(text).slice(0, 1000) },
+      }]
+    }, cfg.apiKey, cfg.baseUrl)
+    if (res.status >= 400) console.warn('[notify] Viber text failed:', res.status, JSON.stringify(res.body))
+    return res
+  } catch (e) { console.error('[notify] Viber text error:', e.message); return { error: e.message } }
+}
+
+module.exports = { notify, sendWhatsAppText, sendViberText, e164PH }
