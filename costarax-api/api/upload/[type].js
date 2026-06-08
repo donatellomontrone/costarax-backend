@@ -121,6 +121,23 @@ async function productMetadataSchemaSupported() {
   return _productMetadataSchemaSupported
 }
 
+const { matchKey } = require('../../lib/product-index')
+
+let _productMatchKeySupported = null
+async function productMatchKeySupported() {
+  if (_productMatchKeySupported !== null) return _productMatchKeySupported
+  const { error } = await supabaseAdmin.from('products').select('id, match_key').limit(1)
+  _productMatchKeySupported = !error
+  return _productMatchKeySupported
+}
+
+// Identity key used for in-memory dedup + idLookup. match_key when the column
+// exists (collapses synonyms), else the legacy lowercased name. Unit = part of SKU.
+function productKey(name, unit, useMK) {
+  const u = (unit || 'kg').toLowerCase().trim()
+  return (useMK ? matchKey(name) : String(name || '').toLowerCase()) + '__' + u
+}
+
 function titleCaseWords(s) {
   return String(s || '').replace(/\b\w/g, c => c.toUpperCase()).trim()
 }
@@ -1071,6 +1088,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
               const meta = inferStructuredProductMeta(canonicalName, unit, item)
               toCreate2.push({
                 canonical_name: canonicalName,
+                match_key: matchKey(canonicalName),
                 category_id,
                 default_unit: unit,
                 active: true,
@@ -1089,24 +1107,26 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           dx.items_lost_to_match_collisions = collisionPairs.reduce((a, n) => a + (n - 1), 0)
           if (toCreate2.length) {
             const schemaSupportsMeta = await productMetadataSchemaSupported()
+            const _mkOn = await productMatchKeySupported()
             // Deduplicate by (canonical_name, default_unit) — same product can appear
             // multiple times with different prices; unique constraint forbids duplicate rows.
             const uniq2Map = new Map()
             for (const item of toCreate2) {
-              const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+              const k = productKey(item.canonical_name, item.default_unit, _mkOn)
               if (!uniq2Map.has(k)) uniq2Map.set(k, item)
             }
             const uniqueToCreate2 = Array.from(uniq2Map.values())
             dx.to_create_after_dedup = uniqueToCreate2.length
             dx.to_create_dropped_by_dedup = toCreate2.length - uniqueToCreate2.length
             const insertPayload = uniqueToCreate2.map(({_price,_unit,_stock, ...p}) => {
+              if (!_mkOn) delete p.match_key
               if (schemaSupportsMeta) return p
               const { producer, brand, cut_type, grade_spec, origin_series, form_factor, pack_weight, ...legacy } = p
               return legacy
             })
             const { data: newP, error: upsertErr } = await supabaseAdmin.from('products')
-              .upsert(insertPayload, { onConflict: 'canonical_name,default_unit', ignoreDuplicates: false })
-              .select('id,canonical_name,default_unit')
+              .upsert(insertPayload, { onConflict: _mkOn ? 'match_key,default_unit' : 'canonical_name,default_unit', ignoreDuplicates: false })
+              .select(_mkOn ? 'id,canonical_name,default_unit,match_key' : 'id,canonical_name,default_unit')
             if (upsertErr) {
               console.error('[price-list upload] products upsert FAILED:', upsertErr.message)
               dx.products_upsert_error = upsertErr.message
@@ -1114,10 +1134,10 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             dx.products_upserted = newP?.length || 0
             if (newP) {
               const idLookup2 = new Map()
-              newP.forEach(p => { idLookup2.set(`${p.canonical_name.toLowerCase()}__${(p.default_unit||'kg').toLowerCase()}`, p.id) })
+              newP.forEach(p => { idLookup2.set(productKey(p.canonical_name, p.default_unit, _mkOn), p.id) })
               let priceRowsBefore = priceRows2.length
               toCreate2.forEach(item => {
-                const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+                const k = productKey(item.canonical_name, item.default_unit, _mkOn)
                 const pid = idLookup2.get(k)
                 if (pid) priceRows2.push({ supplier_id: supplierId, product_id: pid, price_php: item._price, stock_qty: item._stock, unit: item._unit, active: true, updated_at: new Date().toISOString() })
               })
@@ -1437,6 +1457,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
       const meta = inferStructuredProductMeta(canonicalName, unit, item)
       toCreate.push({
         canonical_name: canonicalName,
+        match_key: matchKey(canonicalName),
         category_id,
         default_unit: unit,
         active: true,
@@ -1451,17 +1472,19 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
   let created = 0, insertError = null, upsertError = null
   if (toCreate.length) {
     const schemaSupportsMeta = await productMetadataSchemaSupported()
+    const _mkOn = await productMatchKeySupported()
     // Deduplicate by (canonical_name, default_unit) before upsert.
     // The same product can appear with two different prices in one upload;
     // the unique constraint on products(canonical_name, default_unit) would
     // reject the whole batch if we send duplicate rows.
     const uniqMap = new Map()
     for (const item of toCreate) {
-      const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+      const k = productKey(item.canonical_name, item.default_unit, _mkOn)
       if (!uniqMap.has(k)) uniqMap.set(k, item)
     }
     const uniqueToCreate = Array.from(uniqMap.values())
     const insertPayload = uniqueToCreate.map(({ _price, _unit, _stock, ...p }) => {
+      if (!_mkOn) delete p.match_key
       if (schemaSupportsMeta) return p
       const { producer, brand, cut_type, grade_spec, origin_series, form_factor, pack_weight, ...legacy } = p
       return legacy
@@ -1471,8 +1494,8 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     const newProducts = []
     for (const batch of chunkArray(insertPayload, SUPABASE_WRITE_CHUNK)) {
       const { data: batchProducts, error: iErr } = await supabaseAdmin.from('products')
-        .upsert(batch, { onConflict: 'canonical_name,default_unit', ignoreDuplicates: false })
-        .select('id, canonical_name, default_unit')
+        .upsert(batch, { onConflict: _mkOn ? 'match_key,default_unit' : 'canonical_name,default_unit', ignoreDuplicates: false })
+        .select(_mkOn ? 'id,canonical_name,default_unit,match_key' : 'id, canonical_name, default_unit')
       if (iErr) {
         insertError = iErr.message
         break
@@ -1482,10 +1505,10 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     if (!insertError && newProducts.length) {
       created = newProducts.length
       const idLookup = new Map()
-      newProducts.forEach(p => { idLookup.set(`${p.canonical_name.toLowerCase()}__${(p.default_unit||'kg').toLowerCase()}`, p.id) })
+      newProducts.forEach(p => { idLookup.set(productKey(p.canonical_name, p.default_unit, _mkOn), p.id) })
       // Map ALL toCreate items (including duplicate canonicals) to their product_id
       toCreate.forEach(item => {
-        const k = `${item.canonical_name.toLowerCase()}__${(item.default_unit||'kg').toLowerCase()}`
+        const k = productKey(item.canonical_name, item.default_unit, _mkOn)
         const pid = idLookup.get(k)
         if (pid) priceRows.push({ supplier_id: supplierId, product_id: pid, price_php: item._price, stock_qty: item._stock, unit: item._unit, active: true, updated_at: new Date().toISOString() })
       })
