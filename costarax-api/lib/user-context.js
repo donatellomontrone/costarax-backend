@@ -37,12 +37,26 @@ function scoreBusinessMembership(row) {
   return score
 }
 
+// Retry a Supabase query a few times on transient errors (503/intermittence).
+// A single flaky organization_members read used to silently drop the user's
+// supplier/business link, causing spurious "No supplier account linked" /
+// "No business associated" failures on otherwise-valid accounts.
+async function _retryQuery(fn, tries = 3) {
+  let last
+  for (let i = 0; i < tries; i++) {
+    last = await fn()
+    if (!last || !last.error) return last
+    await new Promise((r) => setTimeout(r, 120 * (i + 1)))
+  }
+  return last
+}
+
 async function resolveUserContext(db, userId, authEmail = null) {
   const [profileRes, orgRes] = await Promise.all([
-    db.from('profiles').select('email, role, status').eq('id', userId).maybeSingle(),
-    db.from('organization_members')
+    _retryQuery(() => db.from('profiles').select('email, role, status').eq('id', userId).maybeSingle()),
+    _retryQuery(() => db.from('organization_members')
       .select('user_id, supplier_id, business_id, suppliers(id,name,status,active,category,city,region,subscription_plan), businesses(id,name,status,city,region)')
-      .eq('user_id', userId),
+      .eq('user_id', userId)),
   ])
 
   const profile = profileRes.data || null
