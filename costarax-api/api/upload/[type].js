@@ -310,15 +310,18 @@ function parseCostaraxTemplate(text, supplierName) {
   // without translating headers. The backend semantics are unchanged.
   const isHeader = (h, aliases) => aliases.includes(h)
   const HDR = {
-    product_name: ['product_name', 'name', 'item', 'pangalan_ng_produkto', 'pangalan', 'produkto'],
-    unit:         ['unit', 'units', 'uom', 'yunit'],
-    price_php:    ['price_php', 'price', 'cost', 'presyo', 'halaga'],
-    brand:        ['brand', 'producer', 'manufacturer', 'marka', 'tatak'],
-    category:     ['category', 'cat', 'kategorya', 'kategoriya', 'uri'],
-    pack_size:    ['pack_size', 'pack_weight', 'packaging', 'sukat_ng_pakete', 'pakete'],
-    stock_qty:    ['stock_qty', 'stock', 'qty', 'quantity', 'inventory', 'available', 'stok', 'dami'],
-    moq:          ['moq', 'min_order', 'minimum_order', 'mq', 'pinakamababang_order'],
-    notes:        ['notes', 'note', 'comments', 'remarks', 'description', 'tala', 'paalala', 'puna']
+    product_name: ['product_name', 'name', 'item', 'item_name', 'product', 'products', 'goods', 'particulars', 'item_description', 'pangalan_ng_produkto', 'pangalan', 'produkto'],
+    unit:         ['unit', 'units', 'uom', 'u/m', 'u_m', 'measure', 'yunit'],
+    price_php:    ['price_php', 'price', 'cost', 'unit_price', 'price/unit', 'price_per_unit', 'selling_price', 'srp', 'amount', 'price_(php)', 'presyo', 'presyo_kada', 'halaga'],
+    brand:        ['brand', 'producer', 'manufacturer', 'make', 'supplier_brand', 'marca', 'marka', 'tatak'],
+    category:     ['category', 'cat', 'type', 'classification', 'food_category', 'kategorya', 'kategoriya', 'uri'],
+    pack_size:    ['pack_size', 'pack', 'packing', 'packaging', 'size', 'pack_weight', 'net_weight', 'weight', 'sukat_ng_pakete', 'pakete', 'laman', 'nilalaman'],
+    grade:        ['grade', 'quality', 'class', 'grado', 'kalidad', 'grade_class'],
+    origin:       ['origin', 'source', 'country', 'country_of_origin', 'provenance', 'pinagmulan', 'bansang_pinagmulan'],
+    cut_type:     ['cut', 'cut_type', 'part', 'portion', 'parte', 'hiwa'],
+    stock_qty:    ['stock_qty', 'stock', 'qty', 'quantity', 'inventory', 'available', 'on_hand', 'qty_available', 'available_stock', 'stok', 'dami', 'bilang'],
+    moq:          ['moq', 'min_order', 'minimum_order', 'min_qty', 'minimum', 'mq', 'pinakamababang_order'],
+    notes:        ['notes', 'note', 'comments', 'remarks', 'remark', 'details', 'description', 'tala', 'paalala', 'puna']
   }
   const nameIdx  = headers.findIndex(h => isHeader(h, HDR.product_name))
   const priceIdx = headers.findIndex(h => isHeader(h, HDR.price_php))
@@ -330,6 +333,9 @@ function parseCostaraxTemplate(text, supplierName) {
   const brandIdx    = headers.findIndex(h => isHeader(h, HDR.brand))
   const categoryIdx = headers.findIndex(h => isHeader(h, HDR.category))
   const packSizeIdx = headers.findIndex(h => isHeader(h, HDR.pack_size))
+  const gradeIdx    = headers.findIndex(h => isHeader(h, HDR.grade))
+  const originIdx   = headers.findIndex(h => isHeader(h, HDR.origin))
+  const cutIdx      = headers.findIndex(h => isHeader(h, HDR.cut_type))
 
   // Category logic lives at module scope (normalizeCategoryLabel / inferCategory)
   // so the AI and commit save paths share the exact same taxonomy.
@@ -354,6 +360,9 @@ function parseCostaraxTemplate(text, supplierName) {
     const brandRaw    = brandIdx    >= 0 ? (cells[brandIdx]    || '').replace(/\s+/g, ' ').trim() : ''
     const categoryRaw = categoryIdx >= 0 ? (cells[categoryIdx] || '').trim() : ''
     const packSize    = packSizeIdx >= 0 ? (cells[packSizeIdx] || '').replace(/\s+/g, ' ').trim() : ''
+    const gradeRaw    = gradeIdx    >= 0 ? (cells[gradeIdx]    || '').replace(/\s+/g, ' ').trim() : ''
+    const originRaw   = originIdx   >= 0 ? (cells[originIdx]   || '').replace(/\s+/g, ' ').trim() : ''
+    const cutRaw      = cutIdx      >= 0 ? (cells[cutIdx]      || '').replace(/\s+/g, ' ').trim() : ''
 
     const stockN = parseFloat(stockRaw)
     const stock = stockRaw === '' ? null : (isFinite(stockN) && stockN >= 0 ? stockN : null)
@@ -371,6 +380,14 @@ function parseCostaraxTemplate(text, supplierName) {
     if (brand && !rawName.toLowerCase().includes(brand.toLowerCase())) {
       canonical = `${brand} ${rawName}`
     }
+
+    // Fold explicit grade / origin / cut columns into the canonical so the
+    // catalog distinguishes e.g. "US Prime Ribeye" from "AU Grass-fed Ribeye".
+    // Additive: only applies when the supplier actually filled those columns,
+    // so existing 4-column templates are completely unaffected.
+    const qualifiers = [originRaw, gradeRaw].filter(q => q && !canonical.toLowerCase().includes(q.toLowerCase()))
+    if (qualifiers.length) canonical = `${qualifiers.join(' ')} ${canonical}`
+    if (cutRaw && !canonical.toLowerCase().includes(cutRaw.toLowerCase())) canonical = `${canonical} ${cutRaw}`
 
     // Append pack_size when meaningful so the catalog disambiguates
     // "Tenderloin 5kg slab" from "Tenderloin 1kg vac pack".
@@ -1105,6 +1122,33 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           const collisionPairs = [...matchedProductIdCounts.values()].filter(n => n > 1)
           dx.match_collisions = collisionPairs.length
           dx.items_lost_to_match_collisions = collisionPairs.reduce((a, n) => a + (n - 1), 0)
+          // ── Basic plan 100-product cap (airtight on the PDF path too) ──
+          // The main/structured save path enforces this; without the same guard
+          // here a Basic supplier could bypass the cap with a large PDF upload.
+          // Pro/Corporate are uncapped (supplierPlan gate below).
+          if (auth.profile.role !== 'admin' && supplierId && supplierPlan === 'basic') {
+            const matchedIds2 = new Set(priceRows2.map(r => r.product_id).filter(Boolean))
+            const toCreateKeys2 = new Set(toCreate2.map(i => `${String(i.canonical_name || '').toLowerCase().trim()}__${String(i.default_unit || 'kg').toLowerCase().trim()}`))
+            const existingPr2 = await fetchAllActiveSupplierPriceRows(supplierId)
+            const existingIds2 = new Set((existingPr2 || []).map(r => r.product_id).filter(Boolean))
+            const projectedDistinct2 = replaceAll
+              ? (matchedIds2.size + toCreateKeys2.size)
+              : (new Set([...existingIds2, ...matchedIds2]).size + toCreateKeys2.size)
+            if (projectedDistinct2 > 100) {
+              if (uploadId) await supabaseAdmin.from('price_list_uploads')
+                .update({ status: 'rejected', ai_summary: JSON.stringify({ error: 'Basic plan 100-product cap', projected: projectedDistinct2 }) })
+                .eq('id', uploadId).catch(() => {})
+              return res.status(403).json({
+                error: `Basic plan is limited to 100 products. This upload would leave your catalog with ${projectedDistinct2} indexed products.`,
+                code: 'PLAN_PRODUCT_CAP',
+                plan: 'basic',
+                limit: 100,
+                current: existingIds2.size,
+                projected: projectedDistinct2,
+                mode: replaceAll ? 'replace' : 'merge'
+              })
+            }
+          }
           if (toCreate2.length) {
             const schemaSupportsMeta = await productMetadataSchemaSupported()
             const _mkOn = await productMatchKeySupported()
