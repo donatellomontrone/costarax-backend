@@ -13,8 +13,14 @@ function deburr(s) {
 }
 
 // Lowercase, deburr, drop punctuation, collapse whitespace.
+// Numeric ranges/grades are glued ("6-7" -> "6x7") BEFORE punctuation is
+// stripped, so grade/marble-score ranges stay distinct in the match key:
+// "Ribeye MS6-7" and "Ribeye MS6-9" must NOT collapse to the same product.
 function normalize(s) {
-  return deburr(s).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return deburr(s).toLowerCase()
+    .replace(/(\d)\s*[-\/]\s*(\d)/g, '$1x$2')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
 }
 
 // Tokens that describe quantity/packaging, not product identity — dropped from

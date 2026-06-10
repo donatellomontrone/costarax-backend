@@ -72,14 +72,15 @@ function chunkArray(items, size = SUPABASE_IN_CHUNK) {
   return out
 }
 
-async function fetchAllActiveCatalogProducts() {
+async function fetchAllActiveCatalogProducts(includeMatchKey = false) {
+  const cols = includeMatchKey ? 'id, canonical_name, default_unit, match_key' : 'id, canonical_name, default_unit'
   const rows = []
   let from = 0
   while (true) {
     const to = from + SUPABASE_PAGE_SIZE - 1
     const { data, error } = await supabaseAdmin
       .from('products')
-      .select('id, canonical_name, default_unit')
+      .select(cols)
       .eq('active', true)
       .range(from, to)
     if (error) throw new Error(error.message)
@@ -516,8 +517,19 @@ async function handlePriceList(req, res) {
   let supplierId = null, supplierName = 'Supplier'
   const org = await resolveSupplierMembership(supabaseAdmin, auth.user.id, auth.user.email)
   supplierId = org?.supplier_id || null
-  if (!supplierId && auth.profile.role !== 'admin') {
-    return res.status(403).json({ error: 'No supplier linked to this account' })
+  // Admins may upload on behalf of a supplier by passing supplier_id in the body.
+  if (!supplierId && auth.profile.role === 'admin' && body?.supplier_id) {
+    supplierId = String(body.supplier_id)
+  }
+  // A price-list upload MUST resolve to a supplier. Without this, an admin
+  // upload used to create catalog products but write ZERO supplier_prices
+  // (the price writes are gated on supplierId) — a silent half-success.
+  if (!supplierId) {
+    return res.status(403).json({
+      error: auth.profile.role === 'admin'
+        ? 'Admin price-list uploads must target a supplier — include supplier_id in the request.'
+        : 'No supplier linked to this account'
+    })
   }
   let supplierPlan = 'basic'
   if (supplierId) {
@@ -559,7 +571,16 @@ async function handlePriceList(req, res) {
       notes: it.notes || null,
     })).filter(it => it.name && it.price > 0)
     useStrictMatching = true
-  } else if (dry_run && hasText) {
+  } else if (dry_run) {
+    // Preview must never write to the DB. The structured (text) path returns
+    // parsed items below; binary files (PDF/image) have no preview path, so
+    // reject instead of falling through to the real save (which used to run).
+    if (!hasText) {
+      return res.status(400).json({
+        error: 'Preview is only available for CSV/Excel uploads — PDF/image files are not previewed (they would save directly).',
+        upload_id: uploadId
+      })
+    }
     const tmplItems = parseCostaraxTemplate(text, supplierName)
     if (!tmplItems || tmplItems.length === 0) {
       if (uploadId) {
@@ -1071,17 +1092,27 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           // product row, exact re-uploads find the existing row, and
           // similar-but-different items create new products instead of
           // collapsing.
-          const catalog2 = await supabaseAdmin.from('products').select('id, canonical_name, default_unit').eq('active', true)
+          const _mkOn2 = await productMatchKeySupported()
+          const catalog2 = await supabaseAdmin.from('products').select(_mkOn2 ? 'id, canonical_name, default_unit, match_key' : 'id, canonical_name, default_unit').eq('active', true)
           const products2 = catalog2.data || []
           function normalize2(s) { return (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim() }
+          // Dual index: match_key (primary, aligned with the upsert's onConflict
+          // so we reuse ids instead of overwriting another supplier's row) +
+          // normalized canonical_name (fallback for not-yet-backfilled rows).
           const productsByExactKey2 = new Map()
+          const productsByMatchKey2 = new Map()
           for (const p of products2) {
-            const k = `${normalize2(p.canonical_name)}__${(p.default_unit||'').toLowerCase().trim()}`
-            productsByExactKey2.set(k, p)
+            const u = (p.default_unit||'').toLowerCase().trim()
+            productsByExactKey2.set(`${normalize2(p.canonical_name)}__${u}`, p)
+            if (_mkOn2 && p.match_key) productsByMatchKey2.set(`${p.match_key}__${u}`, p)
           }
           function matchProductStrict2(canonical, unit) {
-            const k = `${normalize2(canonical)}__${(unit||'').toLowerCase().trim()}`
-            return productsByExactKey2.get(k) || null
+            const u = (unit||'').toLowerCase().trim()
+            if (_mkOn2) {
+              const byMk = productsByMatchKey2.get(`${matchKey(canonical)}__${u}`)
+              if (byMk) return byMk
+            }
+            return productsByExactKey2.get(`${normalize2(canonical)}__${u}`) || null
           }
           const validItems2 = collapseExtractedItems(extracted)
           dx.after_collapse_extracted = validItems2.length
@@ -1201,6 +1232,12 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             // is what the old full-wipe was guarding against — without silently
             // removing products a buyer could otherwise still find in search.
             const incomingIds2 = [...new Set(dedupedPriceRows2.map(r => r.product_id))]
+            // Back up the rows we are about to delete so a failed insert can be
+            // rolled back — there is no DB transaction across PostgREST calls, so
+            // a delete-then-failed-insert used to wipe the supplier's prices.
+            const { data: _backup2 } = await supabaseAdmin
+              .from('supplier_prices').select('*')
+              .eq('supplier_id', supplierId).in('product_id', incomingIds2)
             const { error: deleteErr } = await supabaseAdmin
               .from('supplier_prices')
               .delete()
@@ -1213,7 +1250,11 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
               const { error: insertErr2 } = await supabaseAdmin
                 .from('supplier_prices')
                 .insert(dedupedPriceRows2)
-              if (insertErr2) persistErr = 'Could not save supplier prices: ' + insertErr2.message
+              if (insertErr2) {
+                persistErr = 'Could not save supplier prices: ' + insertErr2.message
+                // Restore the deleted rows so the supplier doesn't lose prices.
+                if (_backup2 && _backup2.length) await supabaseAdmin.from('supplier_prices').insert(_backup2)
+              }
             }
           }
           const matched2 = dedupedPriceRows2.length
@@ -1420,7 +1461,8 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
 
   if (!extracted.length) return res.status(422).json({ error: 'No products found in the file.' })
 
-  const products = await fetchAllActiveCatalogProducts()
+  const _mkOnMatch = await productMatchKeySupported()
+  const products = await fetchAllActiveCatalogProducts(_mkOnMatch)
   function normalize(s) { return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() }
   function tokens(s) { return normalize(s).split(' ').filter(t => t.length > 2) }
   const CUT_START_RX = /\b(strip\s*loin|striploin|rib\s*eye|ribeye|cube\s*roll|tenderloin|short\s*loin|sirloin|porterhouse|t-bone|tomahawk|chuck\s*roll|strip|loin|butter|salami|cheese|wagyu)\b/i
@@ -1466,16 +1508,27 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
   // exact (case-insensitive, normalized) match. Used for template uploads
   // where the canonical name is deterministic and we don't want fuzzy
   // matches collapsing distinct items.
-  const productsByExactKey = new Map()
+  // Index the catalog by BOTH the match_key (primary, when the column is live)
+  // and the normalized canonical_name (fallback for rows whose match_key isn't
+  // backfilled yet). The match_key is the SAME key the products upsert conflicts
+  // on, so matching by it means we reuse the existing row's id WITHOUT the upsert
+  // later UPDATE-ing (and overwriting) another supplier's catalog row.
+  const productsByExactKey = new Map()   // normalize(canonical_name) + unit
+  const productsByMatchKey = new Map()   // match_key + unit
   if (useStrictMatching) {
     for (const p of products) {
-      const k = `${normalize(p.canonical_name)}__${(p.default_unit||'').toLowerCase().trim()}`
-      productsByExactKey.set(k, p)
+      const u = (p.default_unit || '').toLowerCase().trim()
+      productsByExactKey.set(`${normalize(p.canonical_name)}__${u}`, p)
+      if (_mkOnMatch && p.match_key) productsByMatchKey.set(`${p.match_key}__${u}`, p)
     }
   }
   function matchProductStrict(canonical, unit) {
-    const k = `${normalize(canonical)}__${(unit||'').toLowerCase().trim()}`
-    return productsByExactKey.get(k) || null
+    const u = (unit || '').toLowerCase().trim()
+    if (_mkOnMatch) {
+      const byMk = productsByMatchKey.get(`${matchKey(canonical)}__${u}`)
+      if (byMk) return byMk
+    }
+    return productsByExactKey.get(`${normalize(canonical)}__${u}`) || null
   }
 
   const validItems = collapseExtractedItems(extracted)
@@ -1633,18 +1686,30 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
   }
 
   if (dedupedPriceRows.length && supplierId) {
+    // Back up the rows we may delete so a failed insert can be rolled back —
+    // there is no DB transaction across PostgREST calls, so a delete-then-failed
+    // -insert used to leave the supplier with NO prices. replace = all of the
+    // supplier's prices; merge = only the incoming product_ids.
+    let _backupMain = []
+    {
+      let bq = supabaseAdmin.from('supplier_prices').select('*').eq('supplier_id', supplierId)
+      if (!replaceAll) bq = bq.in('product_id', incomingIds)
+      const { data: _bk } = await bq
+      _backupMain = _bk || []
+    }
+    let deletedOk = false
     if (replaceAll) {
       const { error: deleteErr } = await supabaseAdmin
         .from('supplier_prices')
         .delete()
         .eq('supplier_id', supplierId)
-      if (deleteErr) {
-        upsertError = 'Could not replace current supplier prices: ' + deleteErr.message
-      }
+      if (deleteErr) upsertError = 'Could not replace current supplier prices: ' + deleteErr.message
+      else deletedOk = true
     } else {
       // Merge semantics: replace only the prices for products present in THIS
       // upload, leaving the supplier's other products (from earlier uploads)
       // intact.
+      deletedOk = true
       for (const batch of chunkArray(incomingIds)) {
         const { error: deleteErr } = await supabaseAdmin
           .from('supplier_prices')
@@ -1653,6 +1718,7 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           .in('product_id', batch)
         if (deleteErr) {
           upsertError = 'Could not clear existing supplier prices: ' + deleteErr.message
+          deletedOk = false
           break
         }
       }
@@ -1664,6 +1730,21 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
           upsertError = 'Could not save supplier prices: ' + uErr.message
           break
         }
+      }
+    }
+    // Rollback: if the delete went through but a (possibly partial) insert
+    // failed, clear any half-written new rows and restore the original prices,
+    // so the supplier never ends up with an emptied or corrupted catalog.
+    if (upsertError && deletedOk) {
+      if (replaceAll) {
+        await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId)
+      } else {
+        for (const batch of chunkArray(incomingIds)) {
+          await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId).in('product_id', batch)
+        }
+      }
+      for (const batch of chunkArray(_backupMain, SUPABASE_WRITE_CHUNK)) {
+        if (batch.length) await supabaseAdmin.from('supplier_prices').insert(batch)
       }
     }
   }
