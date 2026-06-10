@@ -17,6 +17,7 @@ const { supabaseAdmin, requireAuth } = require('../../lib/supabase-admin')
 const { applyCors } = require('../../lib/cors')
 const { resolveSupplierMembership } = require('../../lib/user-context')
 const { projectCatalogSizeAfterUpload } = require('../../lib/upload-mode')
+const { enforce, clientIp } = require('../../lib/rate-limit')
 
 exports.config = { api: { bodyParser: false } }
 
@@ -439,6 +440,12 @@ async function handlePriceList(req, res) {
   if (!['supplier', 'admin'].includes(auth.profile.role)) {
     return res.status(403).json({ error: 'Supplier access required' })
   }
+
+  // Cost guard: the file/PDF path can issue many Anthropic calls per request.
+  // Cap uploads per user/hour so a runaway client or abuse can't run up the AI
+  // bill. Fail-open: if the rate_limits table is unavailable, allow the upload
+  // (don't block a legitimate supplier) — the limit still applies normally.
+  if (!(await enforce(req, res, { bucket: 'upload-price-list', identifier: auth.user.id || clientIp(req), max: 60, windowSec: 3600, failClosed: false }))) return
 
   let body
   try { body = await readJsonBody(req) } catch (e) { return res.status(400).json({ error: e.message }) }
@@ -1235,14 +1242,14 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
             // Back up the rows we are about to delete so a failed insert can be
             // rolled back — there is no DB transaction across PostgREST calls, so
             // a delete-then-failed-insert used to wipe the supplier's prices.
-            const { data: _backup2 } = await supabaseAdmin
-              .from('supplier_prices').select('*')
-              .eq('supplier_id', supplierId).in('product_id', incomingIds2)
-            const { error: deleteErr } = await supabaseAdmin
-              .from('supplier_prices')
-              .delete()
-              .eq('supplier_id', supplierId)
-              .in('product_id', incomingIds2)
+            // replace_all wipes the WHOLE supplier catalog (was wrongly merging);
+            // merge replaces only the incoming product_ids.
+            let _bq2 = supabaseAdmin.from('supplier_prices').select('*').eq('supplier_id', supplierId)
+            if (!replaceAll) _bq2 = _bq2.in('product_id', incomingIds2)
+            const { data: _backup2 } = await _bq2
+            let _del2 = supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', supplierId)
+            if (!replaceAll) _del2 = _del2.in('product_id', incomingIds2)
+            const { error: deleteErr } = await _del2
             dx.merge_delete_error = deleteErr?.message || null
             if (deleteErr) {
               persistErr = 'Could not clear existing supplier prices: ' + deleteErr.message
@@ -1566,6 +1573,29 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
     }
   }
 
+  // ── Basic plan 100-product cap — checked BEFORE creating any products, so a
+  // rejected Basic upload never leaks orphan catalog rows (the old check ran
+  // AFTER the products upsert). Pro/Corporate are uncapped.
+  if (auth.profile.role !== 'admin' && supplierId && supplierPlan === 'basic') {
+    const matchedIdsCap = new Set(priceRows.map(r => r.product_id).filter(Boolean))
+    const toCreateKeysCap = new Set(toCreate.map(i => productKey(i.canonical_name, i.default_unit, _mkOnMatch)))
+    const existingPrCap = await fetchAllActiveSupplierPriceRows(supplierId)
+    const existingIdsCap = new Set((existingPrCap || []).map(r => r.product_id).filter(Boolean))
+    const projectedDistinctCap = replaceAll
+      ? (matchedIdsCap.size + toCreateKeysCap.size)
+      : (new Set([...existingIdsCap, ...matchedIdsCap]).size + toCreateKeysCap.size)
+    if (projectedDistinctCap > 100) {
+      if (uploadId) await supabaseAdmin.from('price_list_uploads')
+        .update({ status: 'rejected', ai_summary: JSON.stringify({ error: 'Basic plan 100-product cap', projected: projectedDistinctCap }) })
+        .eq('id', uploadId).catch(() => {})
+      return res.status(403).json({
+        error: `Basic plan is limited to 100 products. This upload would leave your catalog with ${projectedDistinctCap} indexed products.`,
+        code: 'PLAN_PRODUCT_CAP', plan: 'basic', limit: 100,
+        current: existingIdsCap.size, projected: projectedDistinctCap, mode: replaceAll ? 'replace' : 'merge'
+      })
+    }
+  }
+
   let created = 0, insertError = null, upsertError = null
   if (toCreate.length) {
     const schemaSupportsMeta = await productMetadataSchemaSupported()
@@ -1667,23 +1697,8 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
   const dedupedPriceRows = collapsePriceRows(priceRows)
   const incomingIds = [...new Set(dedupedPriceRows.map(r => r.product_id))]
 
-  if (auth.profile.role !== 'admin' && supplierId && supplierPlan === 'basic' && incomingIds.length) {
-    const existingPr = await fetchAllActiveSupplierPriceRows(supplierId)
-    const existingIds = new Set((existingPr || []).map(r => r.product_id).filter(Boolean))
-    const currentDistinct = existingIds.size
-    const projectedDistinct = projectCatalogSizeAfterUpload([...existingIds], incomingIds, replaceAll)
-    if (projectedDistinct > 100) {
-      return res.status(403).json({
-        error: `Basic plan is limited to 100 products. This upload would leave your catalog with ${projectedDistinct} indexed products.`,
-        code: 'PLAN_PRODUCT_CAP',
-        plan: 'basic',
-        limit: 100,
-        current: currentDistinct,
-        projected: projectedDistinct,
-        mode: replaceAll ? 'replace' : 'merge'
-      })
-    }
-  }
+  // (The Basic 100-product cap is enforced earlier — BEFORE the products upsert —
+  // so a rejected upload doesn't leave orphan catalog rows behind.)
 
   if (dedupedPriceRows.length && supplierId) {
     // Back up the rows we may delete so a failed insert can be rolled back —
