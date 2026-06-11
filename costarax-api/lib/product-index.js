@@ -20,6 +20,9 @@ function normalize(s) {
   return deburr(s).toLowerCase()
     .replace(/(\d)\s*[-\/]\s*(\d)/g, '$1x$2')
     .replace(/[^a-z0-9\s]/g, ' ')
+    // Glue a number to a following unit ("30 g" -> "30g", "500 ml" -> "500ml")
+    // so spaced and glued sizes collapse to the SAME distinguishing token.
+    .replace(/\b(\d+(?:\.\d+)?)\s+(kgs?|gr?|grams?|mg|ml|cl|lt?|ltr|liters?|litres?|oz|lbs?|pcs?|pieces?)\b/g, '$1$2')
     .replace(/\s+/g, ' ').trim();
 }
 
@@ -212,10 +215,11 @@ function matchKey(name) {
   const base = applyAliases(normalize(name));
   const toks = base.split(' ').filter(t => {
     if (!t) return false;
-    if (STOPWORDS.has(t)) return false;                                // particle / filler
-    if (UNIT_TOKENS.has(t)) return false;                              // bare unit token
-    if (/^\d+(?:\.\d+)?$/.test(t)) return false;                       // pure number
-    if (/^\d+(?:\.\d+)?(kg|kgs|g|gr|grams?|mg|ml|cl|l|lt|ltr|oz|lb|lbs|pc|pcs)$/.test(t)) return false; // glued e.g. 1kg, 500g, 12pcs
+    if (STOPWORDS.has(t)) return false;     // particle / filler
+    if (UNIT_TOKENS.has(t)) return false;   // bare unit word (kg, pc, box…) with no number
+    // Numbers and glued sizes/grades (30g, 50g, "size 22", "n 1", "igp 3") are
+    // KEPT — they distinguish SKUs: caviar 30g ≠ 50g, oyster N.1 ≠ N.3,
+    // balsamic IGP 2 ≠ IGP 4. (Dropping them used to silently merge them.)
     return true;
   });
   const uniq = [...new Set(toks)].sort();   // dedupe synonym collisions + order-insensitive
