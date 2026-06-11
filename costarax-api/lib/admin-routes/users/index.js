@@ -184,6 +184,52 @@ module.exports = async (req, res) => {
       return handleUserUpdate(auth, req.body, res)
     }
 
+    // ── Impersonate ("Log in as") ─────────────────────────────────────────
+    // Mint a one-time magic-link token for the target account so an admin can
+    // jump straight in AS that supplier/buyer — no password needed. Admin-only
+    // (requireAdmin above); a plain admin may NOT impersonate another admin.
+    if (action === 'impersonate') {
+      let targetEmail = String(email || '').trim().toLowerCase() || null
+      if (!targetEmail && id) {
+        const { data } = await supabaseAdmin.auth.admin.getUserById(id)
+        targetEmail = data?.user?.email?.toLowerCase() || null
+      }
+      if (!targetEmail && (supplier_id || business_id)) {
+        const col = supplier_id ? 'supplier_id' : 'business_id'
+        const { data: mem } = await supabaseAdmin.from('organization_members')
+          .select('user_id').eq(col, supplier_id || business_id).limit(1).maybeSingle()
+        if (mem?.user_id) {
+          const { data } = await supabaseAdmin.auth.admin.getUserById(mem.user_id)
+          targetEmail = data?.user?.email?.toLowerCase() || null
+        }
+        if (!targetEmail) {
+          const tbl = supplier_id ? 'suppliers' : 'businesses'
+          const { data: row } = await supabaseAdmin.from(tbl).select('contact_email').eq('id', supplier_id || business_id).maybeSingle()
+          targetEmail = row?.contact_email ? String(row.contact_email).trim().toLowerCase() : null
+        }
+      }
+      if (!targetEmail) return res.status(404).json({ error: 'Could not resolve a login email for that account — make sure it has a linked user.' })
+
+      const { data: tProf } = await supabaseAdmin.from('profiles').select('role').eq('email', targetEmail).maybeSingle()
+      if (tProf && ['admin', 'super_admin'].includes(tProf.role) && auth.profile.role !== 'super_admin') {
+        return res.status(403).json({ error: 'Only a super-admin can impersonate another admin account.' })
+      }
+
+      if (!(await enforce(req, res, { bucket: 'admin-impersonate', identifier: auth.user.id, max: 40, windowSec: 3600 }))) return
+
+      const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({ type: 'magiclink', email: targetEmail })
+      const tokenHash = linkData?.properties?.hashed_token
+      if (linkErr || !tokenHash) return res.status(500).json({ error: linkErr?.message || 'Could not generate a login token for that account.' })
+
+      await logAdminAction(supabaseAdmin, {
+        admin_id: auth.user.id,
+        action_type: 'impersonate',
+        target_id: String(supplier_id || business_id || id || targetEmail),
+        notes: `impersonated ${targetEmail}`,
+      })
+      return res.status(200).json({ token_hash: tokenHash, email: targetEmail })
+    }
+
     // Link (or unlink) a user to a supplier organisation
     if (action === 'link_supplier') {
       if (!id) return res.status(400).json({ error: 'User id is required' })
