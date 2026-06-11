@@ -10,6 +10,35 @@ function normalizeUiRole(role) {
   return role || '—'
 }
 
+async function ensureProfileForLink(id, fallbackRole) {
+  const { data: authUser, error: authErr } = await supabaseAdmin.auth.admin.getUserById(id)
+  if (authErr || !authUser?.user?.id) {
+    const msg = authErr?.message || 'User not found in authentication system.'
+    const err = new Error(msg)
+    err.statusCode = 404
+    throw err
+  }
+
+  const canonicalEmail = authUser.user.email?.trim()?.toLowerCase?.() || null
+  const { data: existingProfile, error: profileErr } = await supabaseAdmin
+    .from('profiles')
+    .select('role,email')
+    .eq('id', id)
+    .maybeSingle()
+  if (profileErr) throw new Error(profileErr.message)
+
+  const role = existingProfile?.role || fallbackRole
+  const { error: upsertErr } = await supabaseAdmin.from('profiles').upsert({
+    id,
+    ...(canonicalEmail || existingProfile?.email ? { email: canonicalEmail || existingProfile.email } : {}),
+    role,
+    status: 'approved',
+  }, { onConflict: 'id' })
+  if (upsertErr) throw new Error(upsertErr.message)
+
+  return { email: canonicalEmail || existingProfile?.email || null, role }
+}
+
 async function handleUserUpdate(auth, body, res) {
   const { id, role, email } = body || {}
   if (!id) return res.status(400).json({ error: 'User id is required' })
@@ -18,7 +47,10 @@ async function handleUserUpdate(auth, body, res) {
   const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier', 'super_admin']
   const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier', super_admin: 'super_admin' }
 
-  const { data: targetAuthUser } = await supabaseAdmin.auth.admin.getUserById(id)
+  const { data: targetAuthUser, error: targetAuthErr } = await supabaseAdmin.auth.admin.getUserById(id)
+  if (targetAuthErr || !targetAuthUser?.user?.id) {
+    return res.status(404).json({ error: targetAuthErr?.message || 'User not found in authentication system.' })
+  }
   const canonicalAuthEmail = targetAuthUser?.user?.email?.trim()?.toLowerCase?.() || null
 
   let roleChanged = null
@@ -288,10 +320,10 @@ module.exports = async (req, res) => {
     // Link (or unlink) a user to a supplier organisation
     if (action === 'link_supplier') {
       if (!id) return res.status(400).json({ error: 'User id is required' })
-      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id)
-      const canonicalEmail = authUser?.user?.email?.trim()?.toLowerCase?.() || null
-      if (canonicalEmail) {
-        try { await supabaseAdmin.from('profiles').upsert({ id, email: canonicalEmail }, { onConflict: 'id' }) } catch (_) {}
+      try {
+        await ensureProfileForLink(id, 'supplier')
+      } catch (e) {
+        return res.status(e.statusCode || 500).json({ error: e.message })
       }
       let linkResult
       try {
@@ -317,10 +349,10 @@ module.exports = async (req, res) => {
 
     if (action === 'link_business') {
       if (!id) return res.status(400).json({ error: 'User id is required' })
-      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id)
-      const canonicalEmail = authUser?.user?.email?.trim()?.toLowerCase?.() || null
-      if (canonicalEmail) {
-        try { await supabaseAdmin.from('profiles').upsert({ id, email: canonicalEmail }, { onConflict: 'id' }) } catch (_) {}
+      try {
+        await ensureProfileForLink(id, 'buyer')
+      } catch (e) {
+        return res.status(e.statusCode || 500).json({ error: e.message })
       }
       let linkResult
       try {
