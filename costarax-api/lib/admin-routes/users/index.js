@@ -230,6 +230,44 @@ module.exports = async (req, res) => {
       return res.status(200).json({ token_hash: tokenHash, email: targetEmail })
     }
 
+    // ── Set password (admin) ──────────────────────────────────────────────
+    // Set a known password for a supplier/buyer login so the admin can sign in
+    // as them normally. Also confirms the email so the account can log in even
+    // if it was never email-verified. Admin-only; not for other admins.
+    if (action === 'set_password') {
+      const pw = String(password || '')
+      if (pw.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' })
+      let userId = id || null
+      if (!userId && (supplier_id || business_id)) {
+        const col = supplier_id ? 'supplier_id' : 'business_id'
+        const { data: mem } = await supabaseAdmin.from('organization_members')
+          .select('user_id').eq(col, supplier_id || business_id).limit(1).maybeSingle()
+        userId = mem?.user_id || null
+      }
+      if (!userId && email) {
+        const { data: prof } = await supabaseAdmin.from('profiles').select('id').eq('email', String(email).trim().toLowerCase()).maybeSingle()
+        userId = prof?.id || null
+      }
+      if (!userId) return res.status(404).json({ error: 'Could not resolve a user for that account — it may have no linked login yet.' })
+
+      const { data: tProf } = await supabaseAdmin.from('profiles').select('role, email').eq('id', userId).maybeSingle()
+      if (tProf && ['admin', 'super_admin'].includes(tProf.role) && auth.profile.role !== 'super_admin') {
+        return res.status(403).json({ error: "Only a super-admin can set another admin's password." })
+      }
+
+      const { data: upd, error: updErr } = await supabaseAdmin.auth.admin.updateUserById(userId, { password: pw, email_confirm: true })
+      if (updErr) return res.status(500).json({ error: updErr.message })
+      const targetEmail = upd?.user?.email || tProf?.email || null
+
+      await logAdminAction(supabaseAdmin, {
+        admin_id: auth.user.id,
+        action_type: 'set_password',
+        target_id: String(supplier_id || business_id || userId),
+        notes: `set password for ${targetEmail || userId}`,
+      })
+      return res.status(200).json({ message: 'Password updated', email: targetEmail })
+    }
+
     // Link (or unlink) a user to a supplier organisation
     if (action === 'link_supplier') {
       if (!id) return res.status(400).json({ error: 'User id is required' })
