@@ -6,6 +6,7 @@ const businessesAction = require('../../lib/admin-routes/businesses-action')
 const paymentsIndex = require('../../lib/admin-routes/payments')
 const usersIndex = require('../../lib/admin-routes/users')
 const cronIndex = require('../../lib/admin-routes/cron')
+const comparisonGroups = require('../../lib/admin-routes/comparison-groups')
 const { applyCors } = require('../../lib/cors')
 module.exports = async (req, res) => {
   if (applyCors(req, res, { methods: 'GET,POST,PATCH,DELETE,OPTIONS' })) return
@@ -60,6 +61,10 @@ module.exports = async (req, res) => {
 
   if (resource === 'cron') {
     return cronIndex(req, res)
+  }
+
+  if (resource === 'comparison-groups') {
+    return comparisonGroups(req, res)
   }
 
   return res.status(404).json({ error: 'Admin route not found' })
