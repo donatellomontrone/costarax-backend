@@ -18,12 +18,16 @@ async function handleUserUpdate(auth, body, res) {
   const VALID_UI_ROLES = ['admin', 'business', 'buyer', 'supplier', 'super_admin']
   const TO_DB_ROLE = { business: 'buyer', buyer: 'buyer', admin: 'admin', supplier: 'supplier', super_admin: 'super_admin' }
 
+  const { data: targetAuthUser } = await supabaseAdmin.auth.admin.getUserById(id)
+  const canonicalAuthEmail = targetAuthUser?.user?.email?.trim()?.toLowerCase?.() || null
+
   let roleChanged = null
   if (role !== undefined) {
     if (!VALID_UI_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role. Must be one of: admin, business, supplier, super_admin` })
     const dbRole = TO_DB_ROLE[role]
 
-    const { data: before } = await supabaseAdmin.from('profiles').select('role').eq('id', id).single()
+    const { data: before, error: beforeErr } = await supabaseAdmin.from('profiles').select('role,email').eq('id', id).maybeSingle()
+    if (beforeErr) return res.status(500).json({ error: beforeErr.message })
     const oldRole = before?.role || null
 
     if ((dbRole === 'super_admin' || oldRole === 'super_admin') && auth.profile.role !== 'super_admin') {
@@ -33,7 +37,13 @@ async function handleUserUpdate(auth, body, res) {
       return res.status(400).json({ error: 'Super-admins cannot demote themselves. Ask another super-admin.' })
     }
 
-    const { error } = await supabaseAdmin.from('profiles').update({ role: dbRole }).eq('id', id)
+    const profileEmail = email?.trim()?.toLowerCase?.() || before?.email || canonicalAuthEmail || null
+    const { error } = await supabaseAdmin.from('profiles').upsert({
+      id,
+      ...(profileEmail ? { email: profileEmail } : {}),
+      role: dbRole,
+      status: 'approved',
+    }, { onConflict: 'id' })
     if (error) return res.status(500).json({ error: error.message })
 
     if (oldRole !== dbRole) roleChanged = { oldRole, newRole: dbRole }
@@ -43,7 +53,14 @@ async function handleUserUpdate(auth, body, res) {
     const newEmail = email.trim().toLowerCase()
     const { error } = await supabaseAdmin.auth.admin.updateUserById(id, { email: newEmail })
     if (error) return res.status(500).json({ error: error.message })
-    try { await supabaseAdmin.from('profiles').update({ email: newEmail }).eq('id', id) } catch (_) {}
+    const { data: existingProfile } = await supabaseAdmin.from('profiles').select('role').eq('id', id).maybeSingle()
+    try {
+      await supabaseAdmin.from('profiles').upsert({
+        id,
+        email: newEmail,
+        role: existingProfile?.role || 'buyer',
+      }, { onConflict: 'id' })
+    } catch (_) {}
   }
 
   let roleEmailQueued = false
