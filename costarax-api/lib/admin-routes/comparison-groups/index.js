@@ -6,7 +6,9 @@
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
 const Anthropic = require('@anthropic-ai/sdk')
 
-const PER_REQUEST = 250
+const PER_REQUEST = 40   // small enough that one request finishes well under the
+                         // serverless timeout (incl. Vercel Hobby's 10s); the
+                         // admin UI loops with progress until done.
 const NOISE = new Set(['dop', 'docg', 'doc', 'igp', 'pdo', 'pgi', 'd', 'o', 'p', 'cheese', 'the', 'of', 'and', 'with'])
 function normKey(s) {
   return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
