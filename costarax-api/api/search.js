@@ -31,22 +31,32 @@ module.exports = async (req, res) => {
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-  const productList = products.slice(0, 150)
-    .map(p => `${p.pid}|${p.name}|${p.unit}|${p.cat}`)
-    .join('\n');
+  // Take as many candidate products as fit a token-safe character budget. The
+  // client sends them pre-ranked by relevance, so the most relevant arrive
+  // first; Haiku's large context lets us consider far more than the old 150 cap
+  // (which, on a multi-thousand-product catalog, hid almost everything).
+  const MAX_CHARS = 100000;
+  let productList = '';
+  for (const p of products) {
+    const line = `${p.pid}|${p.name}|${p.unit}|${p.cat}\n`;
+    if (productList.length + line.length > MAX_CHARS) break;
+    productList += line;
+  }
+  productList = productList.trimEnd();
 
   try {
     const msg = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 256,
-      system: `You are a product search assistant for a Filipino foodservice procurement platform (restaurants, hotels, catering).
-Match buyer search queries to product IDs from the list. Understand Filipino terms, cooking contexts, and ingredient synonyms.
-Return ONLY valid JSON: {"pids":["pid1","pid2"],"intent":"what the buyer is looking for"}.
-Be inclusive — if someone asks for "sinigang ingredients" return all relevant products (pork/fish, vegetables, tamarind, etc.).
-Max 12 pids. No explanation, just the JSON.`,
+      max_tokens: 600,
+      system: `You are the search engine for Costarax, a B2B foodservice procurement platform in the Philippines (restaurants, hotels, caterers). Suppliers range from local wet-market traders to premium importers (wagyu, caviar, Italian/French/Japanese specialties).
+Given a buyer query and a catalog, return the product IDs that genuinely satisfy the intent — best match first.
+Understand: English + Filipino/Tagalog synonyms (bangus=milkfish, hipon=shrimp, baboy=pork, manok=chicken), Italian/French/Japanese food terms, brands, cuts & grades (ribeye, tenderloin, MS6-7, A5 wagyu), and COOKING CONTEXTS — e.g. "ingredients for carbonara" → guanciale/pancetta, pecorino/parmesan, eggs, pasta; "sinigang" → pork or fish, tamarind/sampalok, vegetables; "for grilling" → steaks, sausages. Handle dietary needs and price/size hints, and tolerate typos.
+Rank by how well each product fits the intent and DROP irrelevant ones. If nothing fits, return an empty list.
+Return ONLY valid JSON: {"pids":["pid1","pid2",...],"intent":"short restatement of what the buyer wants"}.
+Max 24 pids, best first. No prose — just the JSON.`,
       messages: [{
         role: 'user',
-        content: `Available products (pid|name|unit|category):\n${productList}\n\nBuyer query: "${q.trim()}"\n\nReturn matching product IDs as JSON.`
+        content: `Catalog (pid|name|unit|category):\n${productList}\n\nBuyer query: "${q.trim()}"\n\nReturn the matching product IDs as JSON, best match first.`
       }]
     });
 
