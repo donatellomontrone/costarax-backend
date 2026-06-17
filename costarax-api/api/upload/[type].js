@@ -18,6 +18,7 @@ const { applyCors } = require('../../lib/cors')
 const { resolveSupplierMembership } = require('../../lib/user-context')
 const { projectCatalogSizeAfterUpload } = require('../../lib/upload-mode')
 const { pruneUnreferencedProducts } = require('../../lib/orphan-products')
+const { fillMissingComparisonKeys } = require('../../lib/comparison-key')
 const { enforce, clientIp } = require('../../lib/rate-limit')
 
 exports.config = { api: { bodyParser: false } }
@@ -1272,19 +1273,25 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
                 persistErr = 'Could not save supplier prices: ' + insertErr2.message
                 // Restore the deleted rows so the supplier doesn't lose prices.
                 if (_backup2 && _backup2.length) await supabaseAdmin.from('supplier_prices').insert(_backup2)
-              } else if (replaceAll) {
-                // A full replace dropped this supplier's previously-listed
-                // products that aren't in the new file — prune any that no
-                // other supplier still sells, so a re-upload leaves no orphan
-                // catalog rows behind (inflated counts / stale search / groups).
-                try {
-                  const _oldIds2 = [...new Set((_backup2 || []).map(r => r.product_id).filter(Boolean))]
-                  const _dropped2 = _oldIds2.filter(id => !incomingIds2.includes(id))
-                  if (_dropped2.length) {
-                    const _pr = await pruneUnreferencedProducts(supabaseAdmin, _dropped2)
-                    dx.orphans_pruned = _pr?.deleted || 0
-                  }
-                } catch (e) { console.warn('[upload v2] orphan prune failed (non-fatal):', e.message) }
+              } else {
+                // Seed comparison_key on this supplier's still-ungrouped
+                // products so new items compare across suppliers immediately.
+                try { await fillMissingComparisonKeys(supabaseAdmin, incomingIds2) }
+                catch (e) { console.warn('[upload v2] comparison-key fill failed (non-fatal):', e.message) }
+                if (replaceAll) {
+                  // A full replace dropped this supplier's previously-listed
+                  // products that aren't in the new file — prune any that no
+                  // other supplier still sells, so a re-upload leaves no orphan
+                  // catalog rows behind (inflated counts / stale search / groups).
+                  try {
+                    const _oldIds2 = [...new Set((_backup2 || []).map(r => r.product_id).filter(Boolean))]
+                    const _dropped2 = _oldIds2.filter(id => !incomingIds2.includes(id))
+                    if (_dropped2.length) {
+                      const _pr = await pruneUnreferencedProducts(supabaseAdmin, _dropped2)
+                      dx.orphans_pruned = _pr?.deleted || 0
+                    }
+                  } catch (e) { console.warn('[upload v2] orphan prune failed (non-fatal):', e.message) }
+                }
               }
             }
           }
@@ -1796,6 +1803,12 @@ IMPORTANT: Every input line MUST become one item in the output JSON array. Do no
         const _dropped = _oldIds.filter(id => !incomingIds.includes(id))
         if (_dropped.length) await pruneUnreferencedProducts(supabaseAdmin, _dropped)
       } catch (e) { console.warn('[upload] orphan prune failed (non-fatal):', e.message) }
+    }
+    // Seed comparison_key on this supplier's still-ungrouped products so new
+    // items are comparable across suppliers immediately — no manual pass.
+    if (!upsertError) {
+      try { await fillMissingComparisonKeys(supabaseAdmin, incomingIds) }
+      catch (e) { console.warn('[upload] comparison-key fill failed (non-fatal):', e.message) }
     }
   }
 

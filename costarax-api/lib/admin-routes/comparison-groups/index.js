@@ -4,6 +4,7 @@
 // Processes a bounded batch per request (to stay under the serverless timeout);
 // the admin UI calls it in a loop until { done: true }.
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
+const { looseComparisonKey } = require('../../comparison-key')
 const Anthropic = require('@anthropic-ai/sdk')
 
 const PER_REQUEST = 40   // small enough that one request finishes well under the
@@ -19,11 +20,17 @@ const SYSTEM = `You normalize foodservice products into a "comparable product ke
 Rules:
 - IGNORE brand/producer, exact pack size/weight, country, marketing words, aging months.
 - KEEP the core product identity, its FORM/cut, and major grade if it changes the item (wheel vs sliced vs grated; ribeye vs tenderloin; whole vs fillet skin-on; raw vs cooked).
+- Group AGGRESSIVELY by core product: a plain product from different brands is ONE key. Ignore brand-line/marketing names (Gran Rosa, Ovalina, Bologna-style, Traditional, Continental, Siciliana) and the meat type when it is implied by the product (mortadella is always pork).
+- Only split when a real ingredient/preparation changes the item (truffle, pistachio, olives, smoked).
 - Output a SHORT generic lowercase phrase (2-5 words).
 Examples:
 "Real Formaggi Parmesan Grana Padano DOP (4-5 KG)" -> "grana padano wheel"
 "Alfra / Soresina Grana Padano 250 g sliced" -> "grana padano sliced"
 "Latteria Soresina Grana Padano D.O.P 1/8 (2.5kg, by piece)" -> "grana padano wheel"
+"Superba Mortadella (Bologna Sausage) (1 kg)" -> "mortadella"
+"BERETTA MORTADELLA OVALINA (500 G)" -> "mortadella"
+"Levoni Mortadella Bologna W/Pistacio IGP (2.5kg)" -> "mortadella pistachio"
+"Australia Casalingo Mortadella with Truffle (Vacuum pack)" -> "mortadella truffle"
 "Salmon Fillet Skin-on Tasmania Sashimi" -> "salmon fillet skin on"
 "Tenderloin MS6-7 Sanchoku 2-4 kg/slab" -> "beef tenderloin"
 Return ONLY JSON mapping every given id to its key: {"<id>":"<key>", ...}. No prose.`
@@ -51,7 +58,7 @@ module.exports = async (req, res) => {
   const total = await countProducts(q => q)
 
   const { data: pending, error: pErr } = await supabaseAdmin
-    .from('products').select('id, canonical_name, category_id')
+    .from('products').select('id, canonical_name, category_id, brand, producer, origin_series, pack_weight, cut_type')
     .eq('active', true).is('comparison_key', null).limit(PER_REQUEST)
   if (pErr) return res.status(500).json({ error: pErr.message })
 
@@ -64,21 +71,29 @@ module.exports = async (req, res) => {
   const byCat = {}
   for (const p of pending) (byCat[p.category_id || 'other'] ||= []).push(p)
   const keyById = {}
+  // Deterministic loose key: the reliable baseline (and the only key used when
+  // the AI omits a product or errors). The AI just refines on top.
+  const fallback = p => looseComparisonKey(p.canonical_name, p) || normKey(p.canonical_name)
   for (const [cat, items] of Object.entries(byCat)) {
-    for (let i = 0; i < items.length; i += 45) {
-      const batch = items.slice(i, i + 45)
+    // Smaller batches + a bigger token budget so the JSON map isn't truncated
+    // (truncation silently dropped ids → every dropped item fell back to a
+    // unique whole-name key → nothing grouped, e.g. mortadella).
+    for (let i = 0; i < items.length; i += 30) {
+      const batch = items.slice(i, i + 30)
       const list = batch.map(p => `${p.id}|${p.canonical_name}`).join('\n')
       try {
         const msg = await ai.messages.create({
-          model: 'claude-haiku-4-5-20251001', max_tokens: 2000, system: SYSTEM,
+          model: 'claude-haiku-4-5-20251001', max_tokens: 3500, system: SYSTEM,
           messages: [{ role: 'user', content: `Category: ${cat}\nProducts (id|name):\n${list}\n\nReturn the JSON map.` }]
         })
         const txt = msg.content[0]?.text || ''
         const json = txt.match(/\{[\s\S]*\}/)?.[0]
         const map = json ? JSON.parse(json) : {}
-        for (const p of batch) keyById[p.id] = normKey(map[p.id] || p.canonical_name) || normKey(p.canonical_name)
+        // AI key when present; otherwise the deterministic loose key (NOT the
+        // whole normalized name, which never groups).
+        for (const p of batch) keyById[p.id] = (map[p.id] && normKey(map[p.id])) || fallback(p)
       } catch (_) {
-        for (const p of batch) keyById[p.id] = normKey(p.canonical_name)
+        for (const p of batch) keyById[p.id] = fallback(p)
       }
     }
   }

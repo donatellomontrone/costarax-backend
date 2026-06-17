@@ -3,6 +3,7 @@ const { sendEmail } = require('../lib/email')
 const { applyCors } = require('../lib/cors')
 const { resolveSupplierMembership } = require('../lib/user-context')
 const { chunkArray, pruneUnreferencedProducts } = require('../lib/orphan-products')
+const { looseComparisonKey } = require('../lib/comparison-key')
 
 const PRODUCT_METADATA_COLUMNS = [
   'producer',
@@ -239,9 +240,10 @@ module.exports = async (req, res) => {
           productId = existingProduct.id
         } else {
           const schemaSupportsMeta = await productMetadataSchemaSupported()
+          const comparison_key = looseComparisonKey(name, metadata)
           const insertPayload = schemaSupportsMeta
-            ? { canonical_name: name, default_unit: unit, category_id: category, active: true, ...metadata }
-            : { canonical_name: name, default_unit: unit, category_id: category, active: true }
+            ? { canonical_name: name, default_unit: unit, category_id: category, active: true, comparison_key, ...metadata }
+            : { canonical_name: name, default_unit: unit, category_id: category, active: true, comparison_key }
           const { data: createdProduct, error: createErr } = await supabaseAdmin
             .from('products')
             .insert(insertPayload)
