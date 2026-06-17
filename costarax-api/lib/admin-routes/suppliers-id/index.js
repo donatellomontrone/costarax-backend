@@ -1,4 +1,5 @@
 const { supabaseAdmin, requireAdmin } = require('../../supabase-admin')
+const { pruneUnreferencedProducts } = require('../../orphan-products')
 
 module.exports = async (req, res) => {
   try {
@@ -126,6 +127,19 @@ module.exports = async (req, res) => {
       const { error } = await supabaseAdmin.from('suppliers').update({ active: false, status: 'rejected' }).eq('id', id)
       if (error) return res.status(500).json({ error: error.message })
       await supabaseAdmin.from('organization_members').delete().eq('supplier_id', id)
+      // Clean up the removed supplier's price rows and prune any products that
+      // no other supplier still sells — otherwise a deleted supplier leaves
+      // active orphan products that inflate the catalog count, surface as
+      // dead-end search hits and dangle in comparison groups.
+      let cleanup = null
+      try {
+        const { data: _priced } = await supabaseAdmin.from('supplier_prices').select('product_id').eq('supplier_id', id)
+        const _productIds = [...new Set((_priced || []).map(r => r.product_id).filter(Boolean))]
+        await supabaseAdmin.from('supplier_prices').delete().eq('supplier_id', id)
+        if (_productIds.length) cleanup = await pruneUnreferencedProducts(supabaseAdmin, _productIds)
+      } catch (cleanupErr) {
+        console.warn('[admin/suppliers DELETE] orphan cleanup failed (non-fatal):', cleanupErr.message)
+      }
       const linkedEmails = (members || []).map(m => m.profiles?.email || m.user_id).filter(Boolean)
       await supabaseAdmin.from('admin_actions').insert({
         admin_id: auth.user.id, action_type: 'remove_supplier', target_id: id,
