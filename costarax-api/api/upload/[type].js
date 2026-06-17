@@ -347,7 +347,11 @@ function parseCostaraxTemplate(text, supplierName) {
   // by appending " (2)", " (3)", … When a supplier lists the same product +
   // unit twice with different prices, we treat each occurrence as a distinct
   // catalog entry rather than letting collapsePriceRows silently drop one.
+  // seenPriceKey additionally captures the price so a row that is identical in
+  // EVERY field (name + unit + price) is skipped as a true duplicate instead of
+  // spawning a phantom " (2)" product.
   const seenKeyCount = new Map()
+  const seenPriceKey = new Set()
   for (let i = 1; i < rows.length; i++) {
     const cells = rows[i]
     // Normalise multi-line cell content: collapse embedded newlines into a single space
@@ -397,8 +401,14 @@ function parseCostaraxTemplate(text, supplierName) {
       canonical = `${canonical} (${packSize})`
     }
 
-    // Disambiguate duplicates: same canonical+unit with a different price gets " (N)"
+    // Skip exact duplicates (same canonical+unit+price) — a supplier listing
+    // a product twice identically must NOT create a phantom " (2)" row.
+    // Same canonical+unit with a DIFFERENT price still gets " (N)" so both
+    // genuine price points survive.
     const dedupKey = `${canonical.toLowerCase()}__${unit.toLowerCase()}`
+    const priceKey = `${dedupKey}__${price.toFixed(2)}`
+    if (seenPriceKey.has(priceKey)) continue
+    seenPriceKey.add(priceKey)
     const seenCount = seenKeyCount.get(dedupKey) || 0
     if (seenCount > 0) canonical = `${canonical} (${seenCount + 1})`
     seenKeyCount.set(dedupKey, seenCount + 1)
