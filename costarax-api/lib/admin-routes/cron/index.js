@@ -7,6 +7,7 @@
 const { supabaseAdmin } = require('../../supabase-admin')
 const { sendEmail, watchlistPriceAlertEmail } = require('../../email')
 const { notify } = require('../../notify')
+const { assignComparisonKeys } = require('../../grouping')
 
 const FREQ_DAYS = { weekly: 7, biweekly: 14, monthly: 30 }
 
@@ -236,11 +237,29 @@ module.exports = async (req, res) => {
     results.errors.push(`watchlist block: ${e.message}`)
   }
 
+  // ── 4. COMPARISON GROUPING ───────────────────────────────────────────────
+  // Auto-refine comparison keys for products seeded at upload but not yet
+  // AI-grouped. Bounded so the cron stays under the 60s function limit; new
+  // products are grouped within a day (and instantly, roughly, by the upload
+  // seed in the meantime). No manual "Build comparison groups" needed.
+  let groupingProcessed = 0
+  try {
+    const deadline = Date.now() + 40000  // leave headroom under maxDuration 60s
+    for (let i = 0; i < 25 && Date.now() < deadline; i++) {
+      const { processed, remaining } = await assignComparisonKeys(supabaseAdmin, { limit: 40 })
+      groupingProcessed += processed
+      if (processed === 0 || remaining === 0) break
+    }
+  } catch (e) {
+    results.errors.push(`grouping block: ${e.message}`)
+  }
+
   return res.status(200).json({
     ok: true,
     recurringCreated:  results.recurring.length,
     staleReminders:    results.stale.length,
     watchlistAlerts:   results.watchlistAlerts.length,
+    groupingProcessed,
     errors:            results.errors,
   })
 }
