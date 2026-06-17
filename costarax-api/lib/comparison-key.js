@@ -18,24 +18,25 @@
 // "(180 g)", "2.5kg", "12 pcs", "500ml" — all dropped.
 const SIZE_RE = /\b\d+(?:[.,]\d+)?\s*(?:-\s*\d+(?:[.,]\d+)?)?\s*(?:kgs?|kilos?|kilograms?|grams?|gr?s?|mg|ml|cl|lt?|ltr|liters?|litres?|oz|lbs?|pcs?|pieces?|packs?|cases?|boxes?|box|tins?|jars?|cans?|bottles?|sachets?|tubs?|units?|x)\b/gi
 
-// Aging windows ("6months", "12-14 months", "24 mos", "2 years") — never part
-// of the product identity for comparison.
-const AGING_RE = /\b\d+(?:\s*-\s*\d+)?\s*(?:months?|mos|mo|yrs?|years?)\b/gi
+// Aging windows ("6months", "12-14 months", "24 mos", "18M", "2 years") —
+// never part of the product identity for comparison.
+const AGING_RE = /\b\d+(?:\s*-\s*\d+)?\s*(?:months?|mos|mo|m|yrs?|years?|y)\b/gi
 
 // Tokens that never define the product's identity for comparison purposes.
 const NOISE = new Set([
   // units / counts
   'kg','kgs','kilo','kilos','g','gr','grs','gram','grams','mg','ml','cl','l','lt','ltr','liter','litre','liters','litres','oz','lb','lbs','pc','pcs','piece','pieces','x',
   // packaging / form / presentation
-  'pack','packs','packed','case','cases','box','boxes','tin','tins','jar','jars','can','cans','bottle','bottles','sachet','sachets','tub','tubs','unit','units','vacuum','vac','whole','portion','portions','by','loaf','wheel','wedge','half','bulk','retail','tray','carton','bag','pouch','pouches','knife',
+  'pack','packs','packed','case','cases','box','boxes','tin','tins','jar','jars','can','cans','bottle','bottles','sachet','sachets','tub','tubs','unit','units','vacuum','vac','whole','portion','portions','by','loaf','wheel','wedge','half','bulk','retail','tray','carton','bag','bags','sack','sacks','sac','pouch','pouches','knife',
   // grade / certification
   'dop','docg','doc','igp','pdo','pgi','pdo.','d','o','p',
   // origins (also stripped from the brand/origin columns, this catches inline)
-  'italy','italia','italian','spain','spanish','espana','france','french','francia','australia','australian','germany','german','deutschland','holland','dutch','usa','uk','swiss','switzerland',
-  // generic marketing / filler
-  'the','and','of','with','w','in','per','a','for','from','premium','selection','quality','superior','original','classic','classico','classica','traditional','continental','deli','gourmet','fine','best','natural','naturale','fresh','long','shelf','life','brand','style','type','assorted','mixed','special',
+  'italy','italia','italian','spain','spanish','espana','france','french','francia','australia','australian','germany','german','deutschland','holland','dutch','usa','uk','swiss','switzerland','imported','import','domestic',
+  // generic marketing / filler (EN + IT)
+  'the','and','of','with','w','in','per','a','for','from','di','de','del','della','dei','al','alla','con','e','su',
+  'premium','selection','quality','superior','original','classic','classico','classica','traditional','continental','deli','gourmet','fine','best','natural','naturale','fresh','long','shelf','life','brand','style','type','tipo','assorted','mixed','special','label','ideale',
   // charcuterie/deli descriptors that don't change the core product
-  'sausage','bologna','salume','salumi','cold','cut','cuts','cured','aged','months','month','mos',
+  'sausage','bologna','salume','salumi','cold','cut','cuts','cured','aged','ham','months','month','mos',
 ])
 
 // Spelling / language unifiers so variants merge instead of splitting.
@@ -46,6 +47,10 @@ const ALIAS = {
   bufala:'buffalo', buffala:'buffalo', bufalo:'buffalo',
   affumicato:'smoked', affumicata:'smoked',
   prosciutti:'prosciutto', formaggio:'cheese', formaggi:'cheese',
+  // bilingual / form unifiers
+  farina:'flour', farine:'flour', semolina:'semola', rimacinata:'semola',
+  disossato:'boneless', disossata:'boneless', debonned:'boneless', deboned:'boneless', debone:'boneless',
+  stagionato:'cured', stagionata:'cured',
 }
 
 function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
